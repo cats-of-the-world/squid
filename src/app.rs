@@ -246,26 +246,20 @@ impl App {
                 self.copy_static_files(output_folder);
             }
             FileChangeType::Markdown => {
-                match website.rebuild_after_markdown_change(output_folder).await {
-                    Ok(()) => match website.compile_templates().await {
-                        Ok(mut files_processed) => {
-                            Self::process_website_files(&mut files_processed).await;
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to compile templates after markdown change: {e}, falling back to full rebuild");
-                            if let Ok(mut files_processed) =
-                                website.build_from_scratch(output_folder).await
-                            {
-                                Self::process_website_files(&mut files_processed).await;
-                            }
-                        }
-                    },
+                match website
+                    .build_incremental_markdown(change, output_folder)
+                    .await
+                {
+                    Ok(mut files_processed) => {
+                        Self::process_website_files(&mut files_processed).await;
+                    }
                     Err(e) => {
-                        eprintln!("Failed to rebuild after markdown change: {e}, falling back to full rebuild");
+                        eprintln!("Incremental markdown rebuild failed: {e}, falling back to full rebuild");
                         if let Ok(mut files_processed) =
                             website.build_from_scratch(output_folder).await
                         {
                             Self::process_website_files(&mut files_processed).await;
+                            self.copy_static_files(output_folder);
                         }
                     }
                 }
@@ -279,6 +273,7 @@ impl App {
                         let mut files_processed =
                             website.build_from_scratch(output_folder).await.unwrap();
                         Self::process_website_files(&mut files_processed).await;
+                        self.copy_static_files(output_folder);
                     }
                 }
             }

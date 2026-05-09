@@ -259,4 +259,14 @@ impl DependencyGraph {
     pub fn partial_for_collection(&self, collection_name: &str) -> Option<PathBuf> {
         self.collection_partials.get(collection_name).cloned()
     }
+
+    /// Returns true if the given markdown path is tracked in the dependency graph.
+    pub fn knows_markdown(&self, path: &Path) -> bool {
+        self.markdown_outputs.contains_key(path)
+    }
+
+    /// Iterate all standalone template → output path mappings.
+    pub fn standalones(&self) -> impl Iterator<Item = (&PathBuf, &PathBuf)> {
+        self.standalone_outputs.iter()
+    }
 }

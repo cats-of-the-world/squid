@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tinylang::eval;
 use tinylang::types::{State, TinyLangType};
-use tokio::fs::create_dir;
+use tokio::fs::{create_dir, create_dir_all, remove_dir_all};
 use tokio::task::JoinSet;
 
 struct Builder {
@@ -163,6 +163,15 @@ impl Website {
     }
 
     pub async fn build_from_scratch(&mut self, output: &Path) -> Result<JoinSet<String>> {
+        if output.exists() {
+            remove_dir_all(output)
+                .await
+                .with_context(|| format!("failed to clean output folder '{}'", output.display()))?;
+        }
+        create_dir_all(output)
+            .await
+            .with_context(|| format!("failed to create output folder '{}'", output.display()))?;
+
         let collections = self.build_markdown_collections().await?;
         let c = self.configuration.clone().unwrap(); //fixme
         let feed_config = FeedConfig {
@@ -220,48 +229,147 @@ impl Website {
         Ok(())
     }
 
-    /// Rebuild collections and RSS after markdown files change. Call compile_templates
-    /// afterward to regenerate HTML.
-    pub async fn rebuild_after_markdown_change(&mut self, output: &Path) -> Result<()> {
+    /// Incrementally rebuild only the outputs affected by a markdown file change.
+    ///
+    /// Rebuilds the changed markdown's HTML output plus all standalone templates (since they
+    /// may list collection items). Falls back by returning an error if a new or deleted
+    /// markdown file is detected (dep graph won't know it).
+    pub async fn build_incremental_markdown(
+        &mut self,
+        change: &FileChangeEvent,
+        output: &Path,
+    ) -> Result<JoinSet<String>> {
         let collections = self.build_markdown_collections().await?;
-        let c = self
-            .configuration
-            .as_ref()
-            .context("config required for RSS")?;
-        let feed_config = crate::rss::FeedConfig {
-            title: c.website_name.clone(),
-            description: c
-                .custom_keys
-                .get("description")
-                .cloned()
-                .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
-            website_url: c.uri.clone(),
-            feed_url: format!("{}/rss.xml", c.uri),
-            author: c
-                .custom_keys
-                .get("author")
-                .cloned()
-                .unwrap_or_else(|| "Unknown Author".to_string()),
-            language: c
-                .custom_keys
-                .get("language")
-                .cloned()
-                .unwrap_or_else(|| "en-us".to_string()),
+
+        // Refresh RSS with updated collection data
+        if let Some(c) = self.configuration.clone() {
+            let feed_config = FeedConfig {
+                title: c.website_name.clone(),
+                description: c
+                    .custom_keys
+                    .get("description")
+                    .cloned()
+                    .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
+                website_url: c.uri.clone(),
+                feed_url: format!("{}/rss.xml", c.uri),
+                author: c
+                    .custom_keys
+                    .get("author")
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown Author".to_string()),
+                language: c
+                    .custom_keys
+                    .get("language")
+                    .cloned()
+                    .unwrap_or_else(|| "en-us".to_string()),
+            };
+            let all_posts: Vec<_> = collections
+                .values()
+                .flat_map(|col| {
+                    col.collection
+                        .iter()
+                        .filter_map(|d| d.to_post_metadata(&feed_config.website_url).ok())
+                })
+                .collect();
+            generate_rss(&feed_config, &all_posts, output).context("Failed to generate RSS")?;
+        }
+
+        let state = self.build_state(&collections);
+
+        // Collect the rebuild plan from the dep graph before releasing borrows.
+        // Each markdown entry: (partial_template_path, output_path, item_tinylang_state)
+        // Each standalone entry: (template_path, output_path)
+        let (markdown_items, standalone_items): (
+            Vec<(PathBuf, PathBuf, tinylang::types::State)>,
+            Vec<(PathBuf, PathBuf)>,
+        ) = {
+            let deps = self.cache.deps.as_ref().context("no dependency graph")?;
+            let collections_ref = self
+                .cache
+                .collections
+                .as_ref()
+                .context("no collections cache")?;
+
+            // Any path not in the dep graph means a file was added or deleted — full rebuild needed.
+            for path in &change.paths {
+                let canonical = path.canonicalize().unwrap_or(path.clone());
+                if !deps.knows_markdown(&canonical) {
+                    return Err(anyhow::anyhow!(
+                        "markdown file not in dependency graph, full rebuild required"
+                    ));
+                }
+            }
+
+            let affected = deps.affected_outputs(change);
+            let mut markdown_items = Vec::new();
+            for out in &affected {
+                if let Some((md_path, coll_name)) = deps.markdown_for_output(out) {
+                    let partial_path = deps
+                        .partial_for_collection(&coll_name)
+                        .context("partial template not found for collection")?;
+                    if let Some(collection) = collections_ref.get(&coll_name) {
+                        let item_name = md_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(item) =
+                            collection.collection.iter().find(|i| i.name == item_name)
+                        {
+                            markdown_items.push((
+                                partial_path,
+                                out.clone(),
+                                item.as_tinylang_state(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let standalone_items = deps
+                .standalones()
+                .map(|(t, o)| (t.clone(), o.clone()))
+                .collect();
+
+            (markdown_items, standalone_items)
         };
-        self.cache.builder = Some(Builder::new(
-            self.build_state(&collections),
-            output.to_path_buf(),
-        ));
-        let all_posts: Vec<_> = collections
-            .values()
-            .flat_map(|c| {
-                c.collection
-                    .iter()
-                    .filter_map(|d| d.to_post_metadata(&feed_config.website_url).ok())
-            })
-            .collect();
-        generate_rss(&feed_config, &all_posts, output).context("Failed to generate RSS")?;
-        Ok(())
+
+        let mut eval_tasks = JoinSet::new();
+
+        for (template_path, output_path, item_state) in markdown_items {
+            let template = TemplateFile::new(&template_path)?;
+            let output_dir = output_path.parent().unwrap().to_path_buf();
+            let file_name = output_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let mut s = state.clone();
+            s.insert("content".into(), item_state.into());
+            eval_tasks.spawn(async move {
+                let html = eval(&template.contents, s).unwrap();
+                io::write_to_disk(output_dir, &file_name, html).await;
+                file_name
+            });
+        }
+
+        for (template_path, output_path) in standalone_items {
+            let template = TemplateFile::new(&template_path)?;
+            let output_dir = output_path.parent().unwrap().to_path_buf();
+            let file_name = output_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let s = state.clone();
+            eval_tasks.spawn(async move {
+                let html = eval(&template.contents, s).unwrap();
+                io::write_to_disk(output_dir, &file_name, html).await;
+                file_name
+            });
+        }
+
+        Ok(eval_tasks)
     }
 
     pub async fn compile_templates(&mut self) -> Result<JoinSet<String>> {
