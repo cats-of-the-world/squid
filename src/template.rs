@@ -274,11 +274,6 @@ impl Website {
                 .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
             website_url: c.uri.clone(),
             feed_url: format!("{}/rss.xml", c.uri),
-            author: c
-                .custom_keys
-                .get("author")
-                .cloned()
-                .unwrap_or_else(|| "Unknown Author".to_string()),
             language: c
                 .custom_keys
                 .get("language")
@@ -346,11 +341,6 @@ impl Website {
                     .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
                 website_url: c.uri.clone(),
                 feed_url: format!("{}/rss.xml", c.uri),
-                author: c
-                    .custom_keys
-                    .get("author")
-                    .cloned()
-                    .unwrap_or_else(|| "Unknown Author".to_string()),
                 language: c
                     .custom_keys
                     .get("language")

@@ -77,7 +77,7 @@ impl MarkdownDocument {
         })
     }
 
-    pub fn to_post_metadata(&self, base_url: &str) -> Result<crate::rss::PostMetadata> {
+    pub fn to_post_metadata(&self, _base_url: &str) -> Result<crate::rss::PostMetadata> {
         // Parse date from header
         let date = self
             .header
@@ -97,7 +97,7 @@ impl MarkdownDocument {
                 // Try simple date format (e.g., "2024-01-10")
                 if let Ok(naive_date) = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d") {
                     if let Some(naive_datetime) = naive_date.and_hms_opt(0, 0, 0) {
-                        return Some(DateTime::<Utc>::from_utc(naive_datetime, Utc));
+                        return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc));
                     }
                 }
 

@@ -1,13 +1,11 @@
 use chrono::{DateTime, Utc};
-use rss::{Channel, Guid, Item};
-use rss::{ChannelBuilder, GuidBuilder, ItemBuilder};
+use rss::{ChannelBuilder, GuidBuilder, Item, ItemBuilder};
 
 pub struct FeedConfig {
     pub title: String,
     pub description: String,
     pub website_url: String,
     pub feed_url: String,
-    pub author: String,
     pub language: String,
 }
 
