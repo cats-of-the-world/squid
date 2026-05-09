@@ -9,6 +9,8 @@ pub struct Configuration {
     pub website_name: String,
     pub uri: String,
     pub custom_keys: HashMap<String, String>,
+    #[serde(default)]
+    pub posts_per_page: Option<usize>,
 }
 
 impl Configuration {

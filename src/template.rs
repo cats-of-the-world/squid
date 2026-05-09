@@ -7,7 +7,7 @@ use anyhow::Context;
 use anyhow::Result;
 
 use crate::md::{MarkdownCollection, MarkdownDocument};
-use crate::tinylang::{render, reverse, sort_by_key};
+use crate::tinylang::{paginate, render, reverse, sort_by_key};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,15 +20,90 @@ struct Builder {
     tinylang_state: Arc<State>,
     output_folder: PathBuf,
     eval_tasks: Option<JoinSet<String>>,
+    posts_per_page: Option<usize>,
+    collections: Arc<HashMap<String, MarkdownCollection>>,
 }
 
 impl Builder {
-    fn new(state: State, output_folder: PathBuf) -> Self {
+    fn new(
+        state: State,
+        output_folder: PathBuf,
+        posts_per_page: Option<usize>,
+        collections: Arc<HashMap<String, MarkdownCollection>>,
+    ) -> Self {
         Self {
             tinylang_state: Arc::new(state),
             output_folder,
             eval_tasks: None,
+            posts_per_page,
+            collections,
         }
+    }
+
+    fn total_pages(&self, per_page: usize) -> usize {
+        let max_items = self
+            .collections
+            .values()
+            .map(|c| c.collection.len())
+            .max()
+            .unwrap_or(0);
+        ((max_items + per_page - 1) / per_page).max(1)
+    }
+
+    fn page_file_name(base_name: &str, page: usize) -> String {
+        if page == 1 {
+            format!("{base_name}.html")
+        } else {
+            format!("{base_name}-page-{page}.html")
+        }
+    }
+
+    fn build_paginated_state(&self, base_name: &str, page: usize, total_pages: usize, per_page: usize) -> State {
+        let mut state = (*self.tinylang_state).clone();
+
+        for (name, collection) in self.collections.iter() {
+            let start = (page - 1) * per_page;
+            let end = (start + per_page).min(collection.collection.len());
+            let page_items: Vec<TinyLangType> = if start < collection.collection.len() {
+                collection.collection[start..end]
+                    .iter()
+                    .map(|doc| TinyLangType::Object(doc.as_tinylang_state()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let mut coll_state = State::new();
+            coll_state.insert(
+                "size".into(),
+                TinyLangType::Numeric(collection.collection.len() as f64),
+            );
+            coll_state.insert("items".into(), TinyLangType::Vec(page_items));
+            state.insert(name.clone(), TinyLangType::Object(coll_state));
+        }
+
+        let next_file = if page < total_pages {
+            TinyLangType::String(Self::page_file_name(base_name, page + 1))
+        } else {
+            TinyLangType::Nil
+        };
+        let prev_file = if page > 1 {
+            TinyLangType::String(Self::page_file_name(base_name, page - 1))
+        } else {
+            TinyLangType::Nil
+        };
+
+        let mut pagination = State::new();
+        pagination.insert("current_page".into(), TinyLangType::Numeric(page as f64));
+        pagination.insert("total_pages".into(), TinyLangType::Numeric(total_pages as f64));
+        pagination.insert("per_page".into(), TinyLangType::Numeric(per_page as f64));
+        pagination.insert("has_next".into(), TinyLangType::Bool(page < total_pages));
+        pagination.insert("has_prev".into(), TinyLangType::Bool(page > 1));
+        pagination.insert("next_file".into(), next_file);
+        pagination.insert("prev_file".into(), prev_file);
+        state.insert("pagination".into(), TinyLangType::Object(pagination));
+
+        state
     }
 
     async fn process_folder(
@@ -62,21 +137,37 @@ impl Builder {
 
     /// build a template without any markdown
     fn eval_template_to_output_file(&mut self, file: TemplateFile) {
-        let output_folder = self.output_folder.to_path_buf();
-        let state = self.tinylang_state.clone();
+        let base_name = file.name.replace(".template", "");
 
-        self.eval_tasks.as_mut().unwrap().spawn(async move {
-            let file_name = file.name.replace(".template", ".html");
-            let html = {
-                let state = (*state).clone();
-
-                eval(&file.contents, state).unwrap()
-            };
-
-            io::write_to_disk(output_folder, &file_name, html).await;
-
-            file_name
-        });
+        match self.posts_per_page {
+            Some(per_page) if per_page > 0 => {
+                let total_pages = self.total_pages(per_page);
+                for page in 1..=total_pages {
+                    let file_name = Self::page_file_name(&base_name, page);
+                    let state = self.build_paginated_state(&base_name, page, total_pages, per_page);
+                    let output_folder = self.output_folder.to_path_buf();
+                    let contents = file.contents.clone();
+                    self.eval_tasks.as_mut().unwrap().spawn(async move {
+                        let html = eval(&contents, state).unwrap();
+                        io::write_to_disk(output_folder, &file_name, html).await;
+                        file_name
+                    });
+                }
+            }
+            _ => {
+                let output_folder = self.output_folder.to_path_buf();
+                let state = self.tinylang_state.clone();
+                self.eval_tasks.as_mut().unwrap().spawn(async move {
+                    let file_name = format!("{base_name}.html");
+                    let html = {
+                        let state = (*state).clone();
+                        eval(&file.contents, state).unwrap()
+                    };
+                    io::write_to_disk(output_folder, &file_name, html).await;
+                    file_name
+                });
+            }
+        }
     }
 
     async fn mk_collection_dir(&mut self, collection: &MarkdownCollection) -> PathBuf {
@@ -195,9 +286,12 @@ impl Website {
                 .unwrap_or_else(|| "en-us".to_string()),
         };
 
+        let posts_per_page = self.configuration.as_ref().and_then(|c| c.posts_per_page);
         self.cache.builder = Some(Builder::new(
             self.build_state(&collections),
             output.to_path_buf(),
+            posts_per_page,
+            Arc::new(collections.clone()),
         ));
 
         self.generate_site_rss(&feed_config, &collections, output)
@@ -637,6 +731,7 @@ impl Website {
         state.insert("render".into(), TinyLangType::Function(render));
         state.insert("sort_by_key".into(), TinyLangType::Function(sort_by_key));
         state.insert("reverse".into(), TinyLangType::Function(reverse));
+        state.insert("paginate".into(), TinyLangType::Function(paginate));
         state
     }
 

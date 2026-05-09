@@ -54,6 +54,39 @@ pub fn sort_by_key(arguments: FuncArguments, _state: &State) -> TinyLangType {
     TinyLangType::Vec(collection)
 }
 
+/// return a slice of items for a given 1-based page number and page size
+pub fn paginate(arguments: FuncArguments, _state: &State) -> TinyLangType {
+    if arguments.len() < 3 {
+        return TinyLangType::Nil;
+    }
+
+    let items = match arguments.first() {
+        Some(TinyLangType::Vec(v)) => v.clone(),
+        _ => return TinyLangType::Nil,
+    };
+
+    let page = match arguments.get(1) {
+        Some(TinyLangType::Numeric(n)) => *n as usize,
+        _ => return TinyLangType::Nil,
+    };
+
+    let per_page = match arguments.get(2) {
+        Some(TinyLangType::Numeric(n)) => *n as usize,
+        _ => return TinyLangType::Nil,
+    };
+
+    if page == 0 || per_page == 0 {
+        return TinyLangType::Nil;
+    }
+
+    let start = (page - 1) * per_page;
+    if start >= items.len() {
+        return TinyLangType::Vec(Vec::new());
+    }
+    let end = (start + per_page).min(items.len());
+    TinyLangType::Vec(items[start..end].to_vec())
+}
+
 /// reverse an array
 pub fn reverse(arguments: FuncArguments, _state: &State) -> TinyLangType {
     let mut collection = match arguments.first() {
