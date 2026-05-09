@@ -20,7 +20,7 @@ notify = "6.0.0"
 regex = "1.10"
 rss = "2.0.12"
 serde = { version = "1.0.160", features = ["derive"] }
-tinylang = "0.3.3"
+tinylang = "0.3.4"
 tokio = { version = "1.27.0", features = ["full"] }
 toml = "0.7.3"
 tower = { version = "0.4.0", features = ["make"] }
