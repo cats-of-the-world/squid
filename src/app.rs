@@ -4,7 +4,9 @@ use crate::http;
 use crate::io::copy_dir;
 use crate::template::Website;
 use crate::watch::FolderWatcher;
-use clap::Parser;
+use chrono::Local;
+use clap::{Parser, Subcommand};
+use std::fs;
 use std::path::Path;
 use std::process::exit;
 use tokio::runtime::Handle;
@@ -12,11 +14,25 @@ use tokio::signal;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+#[derive(Subcommand, Debug, Clone)]
+enum Commands {
+    /// Create a new content file
+    New {
+        /// Target folder (e.g. posts)
+        folder: String,
+        /// File name without extension
+        name: String,
+    },
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub(crate) struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     #[arg(short, long)]
-    template_folder: String,
+    template_folder: Option<String>,
 
     #[arg(short, long)]
     markdown_folder: Option<String>,
@@ -28,7 +44,7 @@ pub(crate) struct Args {
     template_variables: Option<String>,
 
     #[arg(short, long)]
-    output_folder: String,
+    output_folder: Option<String>,
 
     #[arg(short, long)]
     watch: bool,
@@ -49,16 +65,28 @@ impl App {
     }
 
     pub async fn run(&mut self) {
-        let output_folder = Path::new(&self.args.output_folder);
-        let website = self.build_website(output_folder).await;
+        if let Some(Commands::New { folder, name }) = &self.args.command {
+            Self::create_new_file(self.args.markdown_folder.as_deref(), folder, name);
+            return;
+        }
+
+        let template_folder = self.args.template_folder.as_deref().unwrap_or_else(|| {
+            eprintln!("error: --template-folder is required when not using a subcommand");
+            exit(1);
+        });
+        let output_folder_str = self.args.output_folder.as_deref().unwrap_or_else(|| {
+            eprintln!("error: --output-folder is required when not using a subcommand");
+            exit(1);
+        });
+        let output_folder = Path::new(output_folder_str);
+        let website = self.build_website(template_folder, output_folder).await;
         self.copy_static_files(output_folder);
 
         let mut async_server = None;
 
         if let Some(port) = self.args.serve.as_ref() {
             println!("Serving website at http://127.0.0.1:{port}");
-            let folder = &self.args.output_folder;
-            async_server = Some(http::serve(*port, folder));
+            async_server = Some(http::serve(*port, output_folder_str));
         }
 
         if let Some(async_server) = async_server {
@@ -78,8 +106,8 @@ impl App {
         }
     }
 
-    async fn build_website(&self, output_folder: &Path) -> Website {
-        let template_folder = Path::new(&self.args.template_folder);
+    async fn build_website(&self, template_folder: &str, output_folder: &Path) -> Website {
+        let template_folder = Path::new(template_folder);
 
         let config = self
             .args
@@ -98,6 +126,34 @@ impl App {
         Self::process_website_files(&mut files_processed).await;
 
         website
+    }
+
+    fn create_new_file(markdown_folder: Option<&str>, folder: &str, name: &str) {
+        let dir = match markdown_folder {
+            Some(base) => Path::new(base).join(folder),
+            None => Path::new(folder).to_path_buf(),
+        };
+        if let Err(e) = fs::create_dir_all(&dir) {
+            eprintln!("Failed to create directory '{folder}': {e}");
+            exit(1);
+        }
+
+        let file_path = dir.join(format!("{name}.md"));
+        if file_path.exists() {
+            eprintln!("File '{}' already exists", file_path.display());
+            exit(1);
+        }
+
+        let title = name.replace('-', " ");
+        let date = Local::now().format("%Y-%m-%d");
+        let content = format!("---\ntitle: {title}\ndate: {date}\n---\n");
+
+        if let Err(e) = fs::write(&file_path, content) {
+            eprintln!("Failed to write '{}': {e}", file_path.display());
+            exit(1);
+        }
+
+        println!("Created '{}'", file_path.display());
     }
 
     async fn process_website_files(files_processed: &mut JoinSet<String>) {
@@ -146,9 +202,11 @@ impl App {
         let (tx, mut rx) = mpsc::channel(1);
         let mut watcher = FolderWatcher::new(Handle::current(), tx);
 
-        watcher
-            .watch(&self.args.template_folder, FileChangeType::Template)
-            .unwrap();
+        if let Some(template_folder) = self.args.template_folder.as_ref() {
+            watcher
+                .watch(template_folder, FileChangeType::Template)
+                .unwrap();
+        }
 
         if let Some(markdown_folder) = self.args.markdown_folder.as_ref() {
             watcher
@@ -166,7 +224,8 @@ impl App {
                 .unwrap();
         }
 
-        let output_folder = Path::new(&self.args.output_folder);
+        let output_folder_str = self.args.output_folder.as_deref().unwrap_or("");
+        let output_folder = Path::new(output_folder_str);
 
         while let Some(change) = rx.recv().await {
             println!("Detected changes on files, rebuilding site");
