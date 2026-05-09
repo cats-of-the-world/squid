@@ -23,10 +23,10 @@ impl MarkdownCollection {
         }
     }
 
-    pub fn to_post_metadata(&self, base_url: &str) -> Vec<crate::rss::PostMetadata> {
+    pub fn to_post_metadata(&self) -> Vec<crate::rss::PostMetadata> {
         self.collection
             .iter()
-            .filter_map(|doc| doc.to_post_metadata(base_url).ok())
+            .filter_map(|doc| doc.to_post_metadata().ok())
             .collect()
     }
 
@@ -77,7 +77,7 @@ impl MarkdownDocument {
         })
     }
 
-    pub fn to_post_metadata(&self, _base_url: &str) -> Result<crate::rss::PostMetadata> {
+    pub fn to_post_metadata(&self) -> Result<crate::rss::PostMetadata> {
         // Parse date from header
         let date = self
             .header
@@ -204,7 +204,7 @@ excerpt: Test excerpt
         )
         .unwrap();
 
-        let metadata = markdown.to_post_metadata("http://localhost:8080").unwrap();
+        let metadata = markdown.to_post_metadata().unwrap();
 
         assert_eq!(metadata.title, "Test Post");
         assert_eq!(metadata.author, "John Doe");

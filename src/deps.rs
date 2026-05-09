@@ -5,6 +5,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+static RENDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"render\s*\(\s*['"]([^'"]+)['"]\s*\)"#).unwrap()
+});
 
 /// Type of source file that can change.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,10 +45,12 @@ pub struct DependencyGraph {
     partial_to_collection: HashMap<PathBuf, String>,
     /// Markdown path -> (collection_name, output_path)
     markdown_outputs: HashMap<PathBuf, (String, PathBuf)>,
-    /// Standalone template path -> output path
-    standalone_outputs: HashMap<PathBuf, PathBuf>,
+    /// Standalone template path -> all output paths (one per page when paginated)
+    standalone_outputs: HashMap<PathBuf, Vec<PathBuf>>,
     /// Output path -> template path (for standalone, reverse lookup)
     output_to_template: HashMap<PathBuf, PathBuf>,
+    /// Output path -> 1-based page number (only set for paginated outputs)
+    output_page: HashMap<PathBuf, usize>,
     /// Output path -> (markdown_path, collection_name) for collection outputs
     output_to_markdown: HashMap<PathBuf, (PathBuf, String)>,
     /// All templates (for transitive closure)
@@ -63,20 +70,16 @@ impl DependencyGraph {
             output_to_template: HashMap::new(),
             output_to_markdown: HashMap::new(),
             all_templates: HashSet::new(),
+            output_page: HashMap::new(),
         }
     }
 
     /// Extract render() calls from template content. Matches render('path') and render("path").
     fn parse_render_calls(content: &str) -> Vec<String> {
-        let mut paths = Vec::new();
-        // Match render('...') or render("...")
-        for cap in regex::Regex::new(r#"render\s*\(\s*['"]([^'"]+)['"]\s*\)"#)
-            .unwrap()
+        RENDER_RE
             .captures_iter(content)
-        {
-            paths.push(cap[1].to_string());
-        }
-        paths
+            .map(|cap| cap[1].to_string())
+            .collect()
     }
 
     /// Resolve a path from a render() call to an absolute path.
@@ -132,14 +135,26 @@ impl DependencyGraph {
         }
     }
 
-    /// Register a standalone template (produces one output).
+    /// Register a standalone template output. Call once per output file (multiple times for paginated templates).
     pub fn register_standalone(&mut self, template_path: PathBuf, output_name: &str) {
         let template_path = template_path.canonicalize().unwrap_or(template_path);
         self.all_templates.insert(template_path.clone());
         let output_path = self.output_folder.join(output_name);
         self.standalone_outputs
-            .insert(template_path.clone(), output_path.clone());
+            .entry(template_path.clone())
+            .or_default()
+            .push(output_path.clone());
         self.output_to_template.insert(output_path, template_path);
+    }
+
+    /// Mark an output as belonging to a specific pagination page (1-based).
+    pub fn register_page_number(&mut self, output_path: PathBuf, page: usize) {
+        self.output_page.insert(output_path, page);
+    }
+
+    /// Return the 1-based page number for a paginated output, or None if not paginated.
+    pub fn page_for_output(&self, path: &Path) -> Option<usize> {
+        self.output_page.get(path).copied()
     }
 
     /// Register a collection partial (produces one output per markdown in collection).
@@ -190,8 +205,8 @@ impl DependencyGraph {
                 }
                 FileChangeType::Template => {
                     // 1. Outputs from this template directly (standalone or partial)
-                    if let Some(out) = self.standalone_outputs.get(&path) {
-                        outputs.insert(out.clone());
+                    if let Some(outs) = self.standalone_outputs.get(&path) {
+                        outputs.extend(outs.iter().cloned());
                     }
                     if let Some(coll_name) = self.partial_to_collection.get(&path) {
                         for (_, (_, out)) in self
@@ -213,8 +228,8 @@ impl DependencyGraph {
                             for dep in dependents {
                                 to_check.push(dep.clone());
                                 // Add outputs for these dependent templates
-                                if let Some(out) = self.standalone_outputs.get(dep) {
-                                    outputs.insert(out.clone());
+                                if let Some(outs) = self.standalone_outputs.get(dep) {
+                                    outputs.extend(outs.iter().cloned());
                                 }
                                 if let Some(coll_name) = self.partial_to_collection.get(dep) {
                                     for (_, (_, out)) in self
@@ -265,8 +280,10 @@ impl DependencyGraph {
         self.markdown_outputs.contains_key(path)
     }
 
-    /// Iterate all standalone template → output path mappings.
+    /// Iterate all standalone template → output path pairs (one per output file).
     pub fn standalones(&self) -> impl Iterator<Item = (&PathBuf, &PathBuf)> {
-        self.standalone_outputs.iter()
+        self.standalone_outputs
+            .iter()
+            .flat_map(|(template, outputs)| outputs.iter().map(move |out| (template, out)))
     }
 }

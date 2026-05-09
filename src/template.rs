@@ -16,6 +16,78 @@ use tinylang::types::{State, TinyLangType};
 use tokio::fs::{create_dir, create_dir_all, remove_dir_all};
 use tokio::task::JoinSet;
 
+fn paginated_state(
+    base_state: &State,
+    collections: &HashMap<String, MarkdownCollection>,
+    base_name: &str,
+    page: usize,
+    total_pages: usize,
+    per_page: usize,
+) -> State {
+    let mut state = base_state.clone();
+
+    for (name, collection) in collections {
+        let start = (page - 1) * per_page;
+        let end = (start + per_page).min(collection.collection.len());
+        let page_items: Vec<TinyLangType> = if start < collection.collection.len() {
+            collection.collection[start..end]
+                .iter()
+                .map(|doc| TinyLangType::Object(doc.as_tinylang_state()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut coll_state = State::new();
+        coll_state.insert(
+            "size".into(),
+            TinyLangType::Numeric(collection.collection.len() as f64),
+        );
+        coll_state.insert("items".into(), TinyLangType::Vec(page_items));
+        state.insert(name.clone(), TinyLangType::Object(coll_state));
+    }
+
+    let next_file = if page < total_pages {
+        TinyLangType::String(page_file_name(base_name, page + 1))
+    } else {
+        TinyLangType::Nil
+    };
+    let prev_file = if page > 1 {
+        TinyLangType::String(page_file_name(base_name, page - 1))
+    } else {
+        TinyLangType::Nil
+    };
+
+    let mut pagination = State::new();
+    pagination.insert("current_page".into(), TinyLangType::Numeric(page as f64));
+    pagination.insert("total_pages".into(), TinyLangType::Numeric(total_pages as f64));
+    pagination.insert("per_page".into(), TinyLangType::Numeric(per_page as f64));
+    pagination.insert("has_next".into(), TinyLangType::Bool(page < total_pages));
+    pagination.insert("has_prev".into(), TinyLangType::Bool(page > 1));
+    pagination.insert("next_file".into(), next_file);
+    pagination.insert("prev_file".into(), prev_file);
+    state.insert("pagination".into(), TinyLangType::Object(pagination));
+
+    state
+}
+
+fn page_file_name(base_name: &str, page: usize) -> String {
+    if page == 1 {
+        format!("{base_name}.html")
+    } else {
+        format!("{base_name}-page-{page}.html")
+    }
+}
+
+fn total_pages_for(collections: &HashMap<String, MarkdownCollection>, per_page: usize) -> usize {
+    let max_items = collections
+        .values()
+        .map(|c| c.collection.len())
+        .max()
+        .unwrap_or(0);
+    ((max_items + per_page - 1) / per_page).max(1)
+}
+
 struct Builder {
     tinylang_state: Arc<State>,
     output_folder: PathBuf,
@@ -41,69 +113,11 @@ impl Builder {
     }
 
     fn total_pages(&self, per_page: usize) -> usize {
-        let max_items = self
-            .collections
-            .values()
-            .map(|c| c.collection.len())
-            .max()
-            .unwrap_or(0);
-        ((max_items + per_page - 1) / per_page).max(1)
-    }
-
-    fn page_file_name(base_name: &str, page: usize) -> String {
-        if page == 1 {
-            format!("{base_name}.html")
-        } else {
-            format!("{base_name}-page-{page}.html")
-        }
+        total_pages_for(&self.collections, per_page)
     }
 
     fn build_paginated_state(&self, base_name: &str, page: usize, total_pages: usize, per_page: usize) -> State {
-        let mut state = (*self.tinylang_state).clone();
-
-        for (name, collection) in self.collections.iter() {
-            let start = (page - 1) * per_page;
-            let end = (start + per_page).min(collection.collection.len());
-            let page_items: Vec<TinyLangType> = if start < collection.collection.len() {
-                collection.collection[start..end]
-                    .iter()
-                    .map(|doc| TinyLangType::Object(doc.as_tinylang_state()))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            let mut coll_state = State::new();
-            coll_state.insert(
-                "size".into(),
-                TinyLangType::Numeric(collection.collection.len() as f64),
-            );
-            coll_state.insert("items".into(), TinyLangType::Vec(page_items));
-            state.insert(name.clone(), TinyLangType::Object(coll_state));
-        }
-
-        let next_file = if page < total_pages {
-            TinyLangType::String(Self::page_file_name(base_name, page + 1))
-        } else {
-            TinyLangType::Nil
-        };
-        let prev_file = if page > 1 {
-            TinyLangType::String(Self::page_file_name(base_name, page - 1))
-        } else {
-            TinyLangType::Nil
-        };
-
-        let mut pagination = State::new();
-        pagination.insert("current_page".into(), TinyLangType::Numeric(page as f64));
-        pagination.insert("total_pages".into(), TinyLangType::Numeric(total_pages as f64));
-        pagination.insert("per_page".into(), TinyLangType::Numeric(per_page as f64));
-        pagination.insert("has_next".into(), TinyLangType::Bool(page < total_pages));
-        pagination.insert("has_prev".into(), TinyLangType::Bool(page > 1));
-        pagination.insert("next_file".into(), next_file);
-        pagination.insert("prev_file".into(), prev_file);
-        state.insert("pagination".into(), TinyLangType::Object(pagination));
-
-        state
+        paginated_state(&self.tinylang_state, &self.collections, base_name, page, total_pages, per_page)
     }
 
     async fn process_folder(
@@ -143,7 +157,7 @@ impl Builder {
             Some(per_page) if per_page > 0 => {
                 let total_pages = self.total_pages(per_page);
                 for page in 1..=total_pages {
-                    let file_name = Self::page_file_name(&base_name, page);
+                    let file_name = page_file_name(&base_name, page);
                     let state = self.build_paginated_state(&base_name, page, total_pages, per_page);
                     let output_folder = self.output_folder.to_path_buf();
                     let contents = file.contents.clone();
@@ -264,22 +278,26 @@ impl Website {
             .with_context(|| format!("failed to create output folder '{}'", output.display()))?;
 
         let collections = self.build_markdown_collections().await?;
-        let c = self.configuration.clone().unwrap(); //fixme
-        let feed_config = FeedConfig {
-            title: c.website_name.clone(),
-            description: c
-                .custom_keys
-                .get("description")
-                .cloned()
-                .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
-            website_url: c.uri.clone(),
-            feed_url: format!("{}/rss.xml", c.uri),
-            language: c
-                .custom_keys
-                .get("language")
-                .cloned()
-                .unwrap_or_else(|| "en-us".to_string()),
-        };
+
+        if let Some(c) = self.configuration.clone() {
+            let feed_config = FeedConfig {
+                title: c.website_name.clone(),
+                description: c
+                    .custom_keys
+                    .get("description")
+                    .cloned()
+                    .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
+                website_url: c.uri.clone(),
+                feed_url: format!("{}/rss.xml", c.uri),
+                language: c
+                    .custom_keys
+                    .get("language")
+                    .cloned()
+                    .unwrap_or_else(|| "en-us".to_string()),
+            };
+            self.generate_site_rss(&feed_config, &collections, output)
+                .await?;
+        }
 
         let posts_per_page = self.configuration.as_ref().and_then(|c| c.posts_per_page);
         self.cache.builder = Some(Builder::new(
@@ -288,9 +306,6 @@ impl Website {
             posts_per_page,
             Arc::new(collections.clone()),
         ));
-
-        self.generate_site_rss(&feed_config, &collections, output)
-            .await?;
 
         self.compile_templates().await
     }
@@ -308,7 +323,7 @@ impl Website {
             let collection_posts = collection
                 .collection
                 .iter()
-                .filter_map(|doc| doc.to_post_metadata(&config.website_url).ok());
+                .filter_map(|doc| doc.to_post_metadata().ok());
             all_posts.extend(collection_posts);
         }
 
@@ -352,7 +367,7 @@ impl Website {
                 .flat_map(|col| {
                     col.collection
                         .iter()
-                        .filter_map(|d| d.to_post_metadata(&feed_config.website_url).ok())
+                        .filter_map(|d| d.to_post_metadata().ok())
                 })
                 .collect();
             generate_rss(&feed_config, &all_posts, output).context("Failed to generate RSS")?;
@@ -362,10 +377,10 @@ impl Website {
 
         // Collect the rebuild plan from the dep graph before releasing borrows.
         // Each markdown entry: (partial_template_path, output_path, item_tinylang_state)
-        // Each standalone entry: (template_path, output_path)
+        // Each standalone entry: (template_path, output_path, page_number)
         let (markdown_items, standalone_items): (
             Vec<(PathBuf, PathBuf, tinylang::types::State)>,
-            Vec<(PathBuf, PathBuf)>,
+            Vec<(PathBuf, PathBuf, Option<usize>)>,
         ) = {
             let deps = self.cache.deps.as_ref().context("no dependency graph")?;
             let collections_ref = self
@@ -410,9 +425,9 @@ impl Website {
                 }
             }
 
-            let standalone_items = deps
+            let standalone_items: Vec<(PathBuf, PathBuf, Option<usize>)> = deps
                 .standalones()
-                .map(|(t, o)| (t.clone(), o.clone()))
+                .map(|(t, o)| (t.clone(), o.clone(), deps.page_for_output(o)))
                 .collect();
 
             (markdown_items, standalone_items)
@@ -437,7 +452,9 @@ impl Website {
             });
         }
 
-        for (template_path, output_path) in standalone_items {
+        let posts_per_page = self.configuration.as_ref().and_then(|c| c.posts_per_page);
+
+        for (template_path, output_path, page_opt) in standalone_items {
             let template = TemplateFile::new(&template_path)?;
             let output_dir = output_path.parent().unwrap().to_path_buf();
             let file_name = output_path
@@ -445,7 +462,18 @@ impl Website {
                 .unwrap()
                 .to_string_lossy()
                 .to_string();
-            let s = state.clone();
+            let s = match (posts_per_page.filter(|&p| p > 0), page_opt) {
+                (Some(per_page), Some(page)) => {
+                    let total = total_pages_for(&collections, per_page);
+                    let base_name = template_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .replace(".template", "");
+                    paginated_state(&state, &collections, &base_name, page, total, per_page)
+                }
+                _ => state.clone(),
+            };
             eval_tasks.spawn(async move {
                 let html = eval(&template.contents, s).unwrap();
                 io::write_to_disk(output_dir, &file_name, html).await;
@@ -509,6 +537,8 @@ impl Website {
         let mut template_reader = LazyFolderReader::new(&self.template_folder, "template")
             .context("could not create template reader for dependency graph")?;
 
+        let posts_per_page = self.configuration.as_ref().and_then(|c| c.posts_per_page);
+
         while let Some(file) = template_reader.async_next().await {
             let file = file?;
             deps.register_template(file.path.clone(), &file.contents, &base_dir);
@@ -517,6 +547,15 @@ impl Website {
                 let collection_name = &file.name[1..file.name.len() - 9];
                 if collections.contains_key(collection_name) {
                     deps.register_collection_partial(collection_name, file.path.clone());
+                }
+            } else if let Some(per_page) = posts_per_page.filter(|&p| p > 0) {
+                let base_name = file.name.replace(".template", "");
+                let total = total_pages_for(collections, per_page);
+                for page in 1..=total {
+                    let output_name = page_file_name(&base_name, page);
+                    let output_path = output_folder.join(&output_name);
+                    deps.register_standalone(file.path.clone(), &output_name);
+                    deps.register_page_number(output_path, page);
                 }
             } else {
                 let output_name = file.name.replace(".template", ".html");
@@ -570,7 +609,12 @@ impl Website {
 
         let collections = self.cache.collections.as_ref().context("no collections")?;
         let state = self.cache.state.as_ref().context("no state")?;
-        let _builder = self.cache.builder.as_mut().context("no builder")?;
+        let posts_per_page = self
+            .cache
+            .builder
+            .as_ref()
+            .context("no builder")?
+            .posts_per_page;
 
         let mut eval_tasks = JoinSet::new();
 
@@ -583,9 +627,23 @@ impl Website {
                     .unwrap()
                     .to_string_lossy()
                     .to_string();
-                let state = state.clone();
+                let eval_state = match (
+                    posts_per_page.filter(|&p| p > 0),
+                    deps.page_for_output(&output_path),
+                ) {
+                    (Some(per_page), Some(page)) => {
+                        let total = total_pages_for(collections, per_page);
+                        let base_name = template_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .replace(".template", "");
+                        paginated_state(state, collections, &base_name, page, total, per_page)
+                    }
+                    _ => state.clone(),
+                };
                 eval_tasks.spawn(async move {
-                    let html = eval(&template.contents, state).unwrap();
+                    let html = eval(&template.contents, eval_state).unwrap();
                     io::write_to_disk(output_folder, &file_name, html).await;
                     file_name
                 });
