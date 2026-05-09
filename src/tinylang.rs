@@ -41,8 +41,8 @@ pub fn sort_by_key(arguments: FuncArguments, _state: &State) -> TinyLangType {
     };
 
     collection.sort_by_key(|e| match e {
-        TinyLangType::Object(o) => o.get(key).unwrap().to_string(),
-        _ => panic!("vector is not a vector of objects"),
+        TinyLangType::Object(o) => o.get(key).map(|v| v.to_string()).unwrap_or_default(),
+        _ => String::new(),
     });
 
     if arguments.len() == 3
