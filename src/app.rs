@@ -17,6 +17,8 @@ use tokio::task::JoinSet;
 
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
+    /// Initialize a new website in the current directory
+    Init,
     /// Create a new content file
     New {
         /// Target folder (e.g. posts)
@@ -66,9 +68,16 @@ impl App {
     }
 
     pub async fn run(&mut self) {
-        if let Some(Commands::New { folder, name }) = &self.args.command {
-            Self::create_new_file(self.args.markdown_folder.as_deref(), folder, name);
-            return;
+        match &self.args.command {
+            Some(Commands::Init) => {
+                Self::init_website();
+                return;
+            }
+            Some(Commands::New { folder, name }) => {
+                Self::create_new_file(self.args.markdown_folder.as_deref(), folder, name);
+                return;
+            }
+            None => {}
         }
 
         let template_folder = self.args.template_folder.as_deref().unwrap_or_else(|| {
@@ -134,6 +143,99 @@ impl App {
         Self::process_website_files(&mut files_processed).await;
 
         Ok(website)
+    }
+
+    fn init_website() {
+        // Directory structure: markdown/posts, templates, static, output
+        let dirs = ["markdown/posts", "templates", "static", "output"];
+        for dir in dirs {
+            if let Err(e) = fs::create_dir_all(dir) {
+                eprintln!("Failed to create directory '{dir}': {e}");
+                exit(1);
+            }
+        }
+
+        let files: &[(&str, &str)] = &[
+            (
+                "config.toml",
+                r#"website_name = "My Website"
+uri = "https://example.com"
+
+[custom_keys]
+description = "A website built with Squid"
+language = "en-us"
+"#,
+            ),
+            (
+                "templates/index.template",
+                r#"<html>
+    <head>
+        <title>{{ website_name }}</title>
+    </head>
+    <body>
+        <h1>{{ website_name }}</h1>
+        <p>{{ description }}</p>
+        <h2>Posts</h2>
+        <ul>
+        {% for post in sort_by_key(posts.items, 'title') %}
+            <li><a href="{{ post.partial_uri }}">{{ post.title }}</a></li>
+        {% end %}
+        </ul>
+    </body>
+</html>
+"#,
+            ),
+            (
+                "templates/_posts.template",
+                r#"<html>
+    <head>
+        <title>{{ content.title }} - {{ website_name }}</title>
+    </head>
+    <body>
+        <h1>{{ content.title }}</h1>
+        {{ content.content }}
+        <br />
+        <a href="/index.html">Back to home</a>
+    </body>
+</html>
+"#,
+            ),
+            (
+                "markdown/posts/hello-world.md",
+                &format!(
+                    "---\ntitle: Hello World\ndate: {}\nauthor: \n---\n\nWelcome to your new Squid website!\n",
+                    Local::now().format("%Y-%m-%d")
+                ),
+            ),
+        ];
+
+        for (path, content) in files {
+            if Path::new(path).exists() {
+                println!("skipped '{path}' (already exists)");
+                continue;
+            }
+            if let Err(e) = fs::write(path, content) {
+                eprintln!("Failed to write '{path}': {e}");
+                exit(1);
+            }
+            println!("created '{path}'");
+        }
+
+        println!();
+        println!("Website initialized. Build with:");
+        println!();
+        println!(
+            "  squid --template-folder templates --markdown-folder markdown \
+             --static-resources static --output-folder output --template-variables config.toml"
+        );
+        println!();
+        println!("Or to watch and serve locally:");
+        println!();
+        println!(
+            "  squid --template-folder templates --markdown-folder markdown \
+             --static-resources static --output-folder output --template-variables config.toml \
+             --watch --serve 8080"
+        );
     }
 
     fn create_new_file(markdown_folder: Option<&str>, folder: &str, name: &str) {
