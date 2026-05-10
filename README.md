@@ -24,13 +24,30 @@ cargo build --release
 Once the project is built, you can run it using the following command:
 
 ```sh
-./target/release/squid --template_folder templates --markdown-folder my_posts --configuration config.toml --output-folder content
+./target/release/squid --template-folder templates --markdown-folder my_posts --template-variables config.toml --output-folder content
 ```
 
 This will generate a new website in the `output` directory using the templates and content from the `templates` and `content` directories.
 
-If you want to see an usage example, check the `tests/integration.rs`. The templates are at `tests/templates` and the expected
-output is in `tests/output`.
+If you want to see an usage example, check the `tests/integration.rs`. The templates are at `tests/templates` and the expected output is in `tests/output`.
+
+## Commands
+
+To set up a new website in the current directory:
+
+```sh
+squid init
+```
+
+This creates the `markdown/`, `templates/`, `static/`, and `output/` folders along with a `config.toml` and some sample templates.
+
+To create a new post:
+
+```sh
+squid new posts my-post-title
+```
+
+This creates `my-post-title.md` inside the `posts` subfolder of your markdown directory.
 
 ## Contributing
 
@@ -41,7 +58,3 @@ If you want to contribute to the project, you can fork the repository and make y
 ## License
 
 Squid is licensed under the MIT license. See the `LICENSE` file for more information.
-
-
-![](squid.jpg)
-<a href="https://www.freepik.com/free-vector/cute-octopus-eating-takoyaki-cartoon-vector-icon-illustration-animal-food-icon-concept-isolated-pr_26259239.htm#query=squid&position=2&from_view=keyword&track=robertav1_2_sidr">Image by catalyststuff</a> on Freepik
