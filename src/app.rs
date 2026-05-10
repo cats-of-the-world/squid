@@ -4,6 +4,7 @@ use crate::http;
 use crate::io::copy_dir;
 use crate::template::Website;
 use crate::watch::FolderWatcher;
+use anyhow::Result;
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -79,7 +80,13 @@ impl App {
             exit(1);
         });
         let output_folder = Path::new(output_folder_str);
-        let website = self.build_website(template_folder, output_folder).await;
+        let website = self
+            .build_website(template_folder, output_folder)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Error building website: {e:#}");
+                exit(1);
+            });
         self.copy_static_files(output_folder);
 
         let mut async_server = None;
@@ -106,14 +113,15 @@ impl App {
         }
     }
 
-    async fn build_website(&self, template_folder: &str, output_folder: &Path) -> Website {
+    async fn build_website(&self, template_folder: &str, output_folder: &Path) -> Result<Website> {
         let template_folder = Path::new(template_folder);
 
         let config = self
             .args
             .template_variables
             .as_ref()
-            .map(|f| Configuration::from_toml(f).unwrap());
+            .map(|f| Configuration::from_toml(f))
+            .transpose()?;
         let markdown_folder = self
             .args
             .markdown_folder
@@ -121,11 +129,11 @@ impl App {
             .map(|f| Path::new(&f).to_path_buf());
 
         let mut website = Website::new(config, template_folder.to_path_buf(), markdown_folder);
-        let mut files_processed = website.build_from_scratch(output_folder).await.unwrap();
+        let mut files_processed = website.build_from_scratch(output_folder).await?;
 
         Self::process_website_files(&mut files_processed).await;
 
-        website
+        Ok(website)
     }
 
     fn create_new_file(markdown_folder: Option<&str>, folder: &str, name: &str) {
@@ -156,16 +164,20 @@ impl App {
         println!("Created '{}'", file_path.display());
     }
 
-    async fn process_website_files(files_processed: &mut JoinSet<String>) {
+    async fn process_website_files(files_processed: &mut JoinSet<Result<String>>) {
         let mut failed = false;
 
         while let Some(res) = files_processed.join_next().await {
             match res {
-                Ok(file) => {
+                Ok(Ok(file)) => {
                     println!("successfully processed {file}");
                 }
+                Ok(Err(e)) => {
+                    eprintln!("failed to process file: {e:#}");
+                    failed = true;
+                }
                 Err(e) => {
-                    eprintln!("task failed {e:?}");
+                    eprintln!("task panicked: {e:?}");
                     failed = true;
                 }
             };
@@ -203,25 +215,31 @@ impl App {
         let mut watcher = FolderWatcher::new(Handle::current(), tx);
 
         if let Some(template_folder) = self.args.template_folder.as_ref() {
-            watcher
-                .watch(template_folder, FileChangeType::Template)
-                .unwrap();
+            if let Err(e) = watcher.watch(template_folder, FileChangeType::Template) {
+                eprintln!("Failed to watch template folder '{template_folder}': {e}");
+                return;
+            }
         }
 
         if let Some(markdown_folder) = self.args.markdown_folder.as_ref() {
-            watcher
-                .watch(markdown_folder, FileChangeType::Markdown)
-                .unwrap();
+            if let Err(e) = watcher.watch(markdown_folder, FileChangeType::Markdown) {
+                eprintln!("Failed to watch markdown folder '{markdown_folder}': {e}");
+                return;
+            }
         }
 
         if let Some(template_var) = self.args.template_variables.as_ref() {
-            watcher.watch(template_var, FileChangeType::Config).unwrap();
+            if let Err(e) = watcher.watch(template_var, FileChangeType::Config) {
+                eprintln!("Failed to watch config file '{template_var}': {e}");
+                return;
+            }
         }
 
         if let Some(static_resources) = self.args.static_resources.as_ref() {
-            watcher
-                .watch(static_resources, FileChangeType::Static)
-                .unwrap();
+            if let Err(e) = watcher.watch(static_resources, FileChangeType::Static) {
+                eprintln!("Failed to watch static resources '{static_resources}': {e}");
+                return;
+            }
         }
 
         let output_folder_str = self.args.output_folder.as_deref().unwrap_or("");
@@ -269,12 +287,13 @@ impl App {
                     Ok(Some(mut files_processed)) => {
                         Self::process_website_files(&mut files_processed).await;
                     }
-                    Ok(None) | Err(_) => {
-                        let mut files_processed =
-                            website.build_from_scratch(output_folder).await.unwrap();
-                        Self::process_website_files(&mut files_processed).await;
-                        self.copy_static_files(output_folder);
-                    }
+                    Ok(None) | Err(_) => match website.build_from_scratch(output_folder).await {
+                        Ok(mut files_processed) => {
+                            Self::process_website_files(&mut files_processed).await;
+                            self.copy_static_files(output_folder);
+                        }
+                        Err(e) => eprintln!("Full rebuild failed: {e:#}"),
+                    },
                 }
             }
         }
