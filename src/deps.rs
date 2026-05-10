@@ -7,9 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-static RENDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"render\s*\(\s*['"]([^'"]+)['"]\s*\)"#).unwrap()
-});
+static RENDER_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r#"render\s*\(\s*['"]([^'"]+)['"]\s*\)"#).unwrap());
 
 /// Type of source file that can change.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

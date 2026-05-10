@@ -67,7 +67,7 @@ impl Iterator for LazyFolderReader {
             return None;
         }
 
-        let current = self.files.pop().unwrap();
+        let current = self.files.pop().expect("files is non-empty, checked above");
         Some(TemplateFile::new(&current))
     }
 }
@@ -86,21 +86,18 @@ impl LazyFolderReader {
             return None;
         }
 
-        let current = self.files.pop().unwrap();
+        let current = self.files.pop().expect("files is non-empty, checked above");
         Some(TemplateFile::new(&current))
     }
 
     fn scan(paths: ReadDir, extension: &str) -> Result<Vec<PathBuf>> {
         let paths: Vec<PathBuf> = paths
-            .map(|path| {
-                let path = path.unwrap();
-                path.path()
-            })
-            .collect();
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<std::io::Result<Vec<_>>>()
+            .context("failed to read directory entry")?;
 
         let mut files: Vec<PathBuf> = paths
-            .clone()
-            .into_iter()
+            .iter()
             .filter(|path| path.is_file())
             .filter(|path| {
                 if let Some(e) = path.extension() {
@@ -109,16 +106,18 @@ impl LazyFolderReader {
                     false
                 }
             })
+            .cloned()
             .collect();
 
         let sub_directories: Vec<PathBuf> = paths
             .into_iter()
             .filter(|path| path.is_dir())
-            .map(|dir| fs::read_dir(dir).context("could not read the folder"))
-            .filter(|r| r.is_ok())
-            .map(|dir| Self::scan(dir.unwrap(), extension))
-            .filter(|r| r.is_ok())
-            .flat_map(|r| r.unwrap())
+            .filter_map(|dir| {
+                fs::read_dir(&dir)
+                    .ok()
+                    .and_then(|rd| Self::scan(rd, extension).ok())
+            })
+            .flatten()
             .collect();
 
         files.extend(sub_directories);
@@ -139,11 +138,18 @@ impl<'a> IntoIterator for &'a LazyFolderReader {
     }
 }
 
-pub(crate) async fn write_to_disk(dir: PathBuf, file_name: &str, output: String) {
-    tokio::fs::create_dir_all(&dir).await.unwrap();
+pub(crate) async fn write_to_disk(dir: PathBuf, file_name: &str, output: String) -> Result<()> {
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("failed to create directory '{}'", dir.display()))?;
     let output_file = dir.join(file_name);
-    let mut file = File::create(output_file).await.unwrap();
-    file.write_all(output.as_bytes()).await.unwrap();
+    let mut file = File::create(&output_file)
+        .await
+        .with_context(|| format!("failed to create file '{}'", output_file.display()))?;
+    file.write_all(output.as_bytes())
+        .await
+        .with_context(|| format!("failed to write file '{}'", output_file.display()))?;
+    Ok(())
 }
 //based on https://stackoverflow.com/questions/26958489/how-to-copy-a-folder-recursively-in-rust
 pub(crate) fn copy_dir(from: &Path, to: &Path) -> Result<()> {

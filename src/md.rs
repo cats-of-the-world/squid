@@ -17,7 +17,7 @@ pub struct MarkdownCollection {
 impl MarkdownCollection {
     pub fn new(path: PathBuf) -> Self {
         Self {
-            name: path.to_str().unwrap().to_string(),
+            name: path.to_string_lossy().to_string(),
             relative_path: path,
             collection: Vec::new(),
         }
@@ -97,7 +97,10 @@ impl MarkdownDocument {
                 // Try simple date format (e.g., "2024-01-10")
                 if let Ok(naive_date) = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d") {
                     if let Some(naive_datetime) = naive_date.and_hms_opt(0, 0, 0) {
-                        return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc));
+                        return Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                            naive_datetime,
+                            Utc,
+                        ));
                     }
                 }
 
@@ -113,7 +116,8 @@ impl MarkdownDocument {
             .or_else(|| self.header.get("description").cloned())
             .unwrap_or_else(|| {
                 // Extract first paragraph from HTML content
-                let plain_text = html2text::from_read(self.html_content.as_bytes(), 80).unwrap();
+                let plain_text =
+                    html2text::from_read(self.html_content.as_bytes(), 80).unwrap_or_default();
                 plain_text
                     .split("\n\n")
                     .next()

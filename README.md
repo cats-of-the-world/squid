@@ -24,7 +24,7 @@ cargo build --release
 Once the project is built, you can run it using the following command:
 
 ```sh
-./target/release/squid --template_folder templates --markdown-folder my_posts --configuration config.toml --output--folder content
+./target/release/squid --template_folder templates --markdown-folder my_posts --configuration config.toml --output-folder content
 ```
 
 This will generate a new website in the `output` directory using the templates and content from the `templates` and `content` directories.

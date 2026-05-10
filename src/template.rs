@@ -60,7 +60,10 @@ fn paginated_state(
 
     let mut pagination = State::new();
     pagination.insert("current_page".into(), TinyLangType::Numeric(page as f64));
-    pagination.insert("total_pages".into(), TinyLangType::Numeric(total_pages as f64));
+    pagination.insert(
+        "total_pages".into(),
+        TinyLangType::Numeric(total_pages as f64),
+    );
     pagination.insert("per_page".into(), TinyLangType::Numeric(per_page as f64));
     pagination.insert("has_next".into(), TinyLangType::Bool(page < total_pages));
     pagination.insert("has_prev".into(), TinyLangType::Bool(page > 1));
@@ -91,7 +94,7 @@ fn total_pages_for(collections: &HashMap<String, MarkdownCollection>, per_page: 
 struct Builder {
     tinylang_state: Arc<State>,
     output_folder: PathBuf,
-    eval_tasks: Option<JoinSet<String>>,
+    eval_tasks: Option<JoinSet<anyhow::Result<String>>>,
     posts_per_page: Option<usize>,
     collections: Arc<HashMap<String, MarkdownCollection>>,
 }
@@ -116,20 +119,33 @@ impl Builder {
         total_pages_for(&self.collections, per_page)
     }
 
-    fn build_paginated_state(&self, base_name: &str, page: usize, total_pages: usize, per_page: usize) -> State {
-        paginated_state(&self.tinylang_state, &self.collections, base_name, page, total_pages, per_page)
+    fn build_paginated_state(
+        &self,
+        base_name: &str,
+        page: usize,
+        total_pages: usize,
+        per_page: usize,
+    ) -> State {
+        paginated_state(
+            &self.tinylang_state,
+            &self.collections,
+            base_name,
+            page,
+            total_pages,
+            per_page,
+        )
     }
 
     async fn process_folder(
         &mut self,
-        eval_tasks: JoinSet<String>,
+        eval_tasks: JoinSet<anyhow::Result<String>>,
         template_folder_reader: &mut LazyFolderReader,
         collections: &HashMap<String, MarkdownCollection>,
-    ) {
+    ) -> Result<()> {
         self.eval_tasks = Some(eval_tasks);
 
         while let Some(file) = template_folder_reader.async_next().await {
-            let file = file.unwrap();
+            let file = file?;
 
             // should handle _name.template differently since they are partials
             // for the rest of the templates we should generate a single output with same name
@@ -140,13 +156,14 @@ impl Builder {
                 let collection_name = &file.name[1..file.name.len() - 9];
                 if let Some(collection) = collections.get(collection_name) {
                     self.eval_markdown_collection_to_output_file(collection.clone(), file)
-                        .await;
+                        .await?;
                 }
                 continue;
             }
 
             self.eval_template_to_output_file(file);
         }
+        Ok(())
     }
 
     /// build a template without any markdown
@@ -161,44 +178,53 @@ impl Builder {
                     let state = self.build_paginated_state(&base_name, page, total_pages, per_page);
                     let output_folder = self.output_folder.to_path_buf();
                     let contents = file.contents.clone();
-                    self.eval_tasks.as_mut().unwrap().spawn(async move {
-                        let html = eval(&contents, state).unwrap();
-                        io::write_to_disk(output_folder, &file_name, html).await;
-                        file_name
-                    });
+                    self.eval_tasks
+                        .as_mut()
+                        .expect("eval_tasks initialized by process_folder")
+                        .spawn(async move {
+                            let html = eval(&contents, state)
+                                .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                            io::write_to_disk(output_folder, &file_name, html).await?;
+                            Ok(file_name)
+                        });
                 }
             }
             _ => {
                 let output_folder = self.output_folder.to_path_buf();
                 let state = self.tinylang_state.clone();
-                self.eval_tasks.as_mut().unwrap().spawn(async move {
-                    let file_name = format!("{base_name}.html");
-                    let html = {
-                        let state = (*state).clone();
-                        eval(&file.contents, state).unwrap()
-                    };
-                    io::write_to_disk(output_folder, &file_name, html).await;
-                    file_name
-                });
+                self.eval_tasks
+                    .as_mut()
+                    .expect("eval_tasks initialized by process_folder")
+                    .spawn(async move {
+                        let file_name = format!("{base_name}.html");
+                        let html = eval(&file.contents, (*state).clone())
+                            .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                        io::write_to_disk(output_folder, &file_name, html).await?;
+                        Ok(file_name)
+                    });
             }
         }
     }
 
-    async fn mk_collection_dir(&mut self, collection: &MarkdownCollection) -> PathBuf {
-        let collection_name = collection.relative_path.clone();
-        let collection_name = collection_name
+    async fn mk_collection_dir(&mut self, collection: &MarkdownCollection) -> Result<PathBuf> {
+        let collection_name = collection
+            .relative_path
             .file_name()
-            .unwrap()
+            .context("collection path has no directory name")?
             .to_string_lossy()
             .to_string();
 
-        let output_folder = self.output_folder.to_path_buf();
-        let output_folder = output_folder.join(&collection_name);
+        let output_folder = self.output_folder.join(&collection_name);
 
         if !output_folder.exists() {
-            create_dir(&output_folder).await.unwrap();
+            create_dir(&output_folder).await.with_context(|| {
+                format!(
+                    "failed to create collection directory '{}'",
+                    output_folder.display()
+                )
+            })?;
         }
-        output_folder
+        Ok(output_folder)
     }
 
     /// builds a collection of markdown files using the appropriate template
@@ -206,8 +232,8 @@ impl Builder {
         &mut self,
         collection: MarkdownCollection,
         template: TemplateFile,
-    ) {
-        let output_folder = self.mk_collection_dir(&collection).await;
+    ) -> Result<()> {
+        let output_folder = self.mk_collection_dir(&collection).await?;
 
         // we need for each item in the collection
         // to evaluate the template using its header and content
@@ -218,23 +244,23 @@ impl Builder {
 
             let template = template.clone();
 
-            self.eval_tasks.as_mut().unwrap().spawn(async move {
-                let html = {
+            self.eval_tasks
+                .as_mut()
+                .expect("eval_tasks initialized by process_folder")
+                .spawn(async move {
                     let mut state = (*state).clone();
-
                     state.insert("content".into(), item.as_tinylang_state().into());
+                    let html = eval(&template.contents, state)
+                        .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
 
-                    eval(&template.contents, state).unwrap()
-                };
+                    // we need to save our file following the markdown file and not the template
+                    let file_name = item.name.replace(".md", ".html");
 
-                // we need to save our file following the markdown file and not the template
-                let file_name = item.name.replace(".md", ".html");
-
-                io::write_to_disk(output_folder, &file_name, html).await;
-
-                file_name
-            });
+                    io::write_to_disk(output_folder, &file_name, html).await?;
+                    Ok(file_name)
+                });
         }
+        Ok(())
     }
 }
 
@@ -267,7 +293,10 @@ impl Website {
         }
     }
 
-    pub async fn build_from_scratch(&mut self, output: &Path) -> Result<JoinSet<String>> {
+    pub async fn build_from_scratch(
+        &mut self,
+        output: &Path,
+    ) -> Result<JoinSet<anyhow::Result<String>>> {
         if output.exists() {
             remove_dir_all(output)
                 .await
@@ -342,7 +371,7 @@ impl Website {
         &mut self,
         change: &FileChangeEvent,
         output: &Path,
-    ) -> Result<JoinSet<String>> {
+    ) -> Result<JoinSet<anyhow::Result<String>>> {
         let collections = self.build_markdown_collections().await?;
 
         // Refresh RSS with updated collection data
@@ -437,18 +466,24 @@ impl Website {
 
         for (template_path, output_path, item_state) in markdown_items {
             let template = TemplateFile::new(&template_path)?;
-            let output_dir = output_path.parent().unwrap().to_path_buf();
+            let output_dir = output_path
+                .parent()
+                .with_context(|| format!("output path has no parent: {}", output_path.display()))?
+                .to_path_buf();
             let file_name = output_path
                 .file_name()
-                .unwrap()
+                .with_context(|| {
+                    format!("output path has no file name: {}", output_path.display())
+                })?
                 .to_string_lossy()
                 .to_string();
             let mut s = state.clone();
             s.insert("content".into(), item_state.into());
             eval_tasks.spawn(async move {
-                let html = eval(&template.contents, s).unwrap();
-                io::write_to_disk(output_dir, &file_name, html).await;
-                file_name
+                let html = eval(&template.contents, s)
+                    .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                io::write_to_disk(output_dir, &file_name, html).await?;
+                Ok(file_name)
             });
         }
 
@@ -456,10 +491,15 @@ impl Website {
 
         for (template_path, output_path, page_opt) in standalone_items {
             let template = TemplateFile::new(&template_path)?;
-            let output_dir = output_path.parent().unwrap().to_path_buf();
+            let output_dir = output_path
+                .parent()
+                .with_context(|| format!("output path has no parent: {}", output_path.display()))?
+                .to_path_buf();
             let file_name = output_path
                 .file_name()
-                .unwrap()
+                .with_context(|| {
+                    format!("output path has no file name: {}", output_path.display())
+                })?
                 .to_string_lossy()
                 .to_string();
             let s = match (posts_per_page.filter(|&p| p > 0), page_opt) {
@@ -475,16 +515,17 @@ impl Website {
                 _ => state.clone(),
             };
             eval_tasks.spawn(async move {
-                let html = eval(&template.contents, s).unwrap();
-                io::write_to_disk(output_dir, &file_name, html).await;
-                file_name
+                let html = eval(&template.contents, s)
+                    .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                io::write_to_disk(output_dir, &file_name, html).await?;
+                Ok(file_name)
             });
         }
 
         Ok(eval_tasks)
     }
 
-    pub async fn compile_templates(&mut self) -> Result<JoinSet<String>> {
+    pub async fn compile_templates(&mut self) -> Result<JoinSet<anyhow::Result<String>>> {
         let mut template_folder_reader =
             LazyFolderReader::new(&self.template_folder, "template")
                 .context("could not create lazy folder reader for template folder")?;
@@ -500,7 +541,7 @@ impl Website {
                     .as_ref()
                     .context("compile_templates called without caching collections")?,
             )
-            .await;
+            .await?;
 
         let output_folder = self
             .cache
@@ -509,16 +550,16 @@ impl Website {
             .context("compile_templates called without caching builder")?
             .output_folder
             .clone();
-        let result = Ok(self
+        let eval_tasks = self
             .cache
             .builder
             .as_mut()
             .context("compile_templates called without caching builder")?
             .eval_tasks
             .take()
-            .unwrap());
+            .context("eval_tasks not initialized in builder")?;
         self.build_dependency_graph(&output_folder).await?;
-        result
+        Ok(eval_tasks)
     }
 
     /// Build the dependency graph for incremental builds. Must be called after
@@ -568,7 +609,7 @@ impl Website {
                 collection
                     .relative_path
                     .file_name()
-                    .unwrap()
+                    .context("collection relative path has no file name")?
                     .to_string_lossy()
                     .as_ref(),
             );
@@ -590,7 +631,7 @@ impl Website {
         &mut self,
         change: &FileChangeEvent,
         _output: &Path,
-    ) -> Result<Option<JoinSet<String>>> {
+    ) -> Result<Option<JoinSet<anyhow::Result<String>>>> {
         let deps = self.cache.deps.as_ref().context("no dependency graph")?;
 
         if deps.requires_full_rebuild(change) {
@@ -621,10 +662,17 @@ impl Website {
         for output_path in affected {
             if let Some(template_path) = deps.template_for_output(&output_path) {
                 let template = TemplateFile::new(&template_path)?;
-                let output_folder = output_path.parent().unwrap().to_path_buf();
+                let output_folder = output_path
+                    .parent()
+                    .with_context(|| {
+                        format!("output path has no parent: {}", output_path.display())
+                    })?
+                    .to_path_buf();
                 let file_name = output_path
                     .file_name()
-                    .unwrap()
+                    .with_context(|| {
+                        format!("output path has no file name: {}", output_path.display())
+                    })?
                     .to_string_lossy()
                     .to_string();
                 let eval_state = match (
@@ -643,9 +691,10 @@ impl Website {
                     _ => state.clone(),
                 };
                 eval_tasks.spawn(async move {
-                    let html = eval(&template.contents, eval_state).unwrap();
-                    io::write_to_disk(output_folder, &file_name, html).await;
-                    file_name
+                    let html = eval(&template.contents, eval_state)
+                        .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                    io::write_to_disk(output_folder, &file_name, html).await?;
+                    Ok(file_name)
                 });
             } else if let Some((md_path, coll_name)) = deps.markdown_for_output(&output_path) {
                 let collection = collections
@@ -661,18 +710,26 @@ impl Website {
                     .partial_for_collection(&coll_name)
                     .context("partial not found")?;
                 let template = TemplateFile::new(&partial_path)?;
-                let output_folder = output_path.parent().unwrap().to_path_buf();
+                let output_folder = output_path
+                    .parent()
+                    .with_context(|| {
+                        format!("output path has no parent: {}", output_path.display())
+                    })?
+                    .to_path_buf();
                 let file_name = output_path
                     .file_name()
-                    .unwrap()
+                    .with_context(|| {
+                        format!("output path has no file name: {}", output_path.display())
+                    })?
                     .to_string_lossy()
                     .to_string();
                 let mut state = state.clone();
                 state.insert("content".into(), item.as_tinylang_state().into());
                 eval_tasks.spawn(async move {
-                    let html = eval(&template.contents, state).unwrap();
-                    io::write_to_disk(output_folder, &file_name, html).await;
-                    file_name
+                    let html = eval(&template.contents, state)
+                        .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                    io::write_to_disk(output_folder, &file_name, html).await?;
+                    Ok(file_name)
                 });
             }
         }
@@ -717,11 +774,19 @@ impl Website {
             // remove the filename
             path.pop();
 
-            //TODO avoid unwrap
-            let path_as_string = path.file_name().unwrap().to_string_lossy();
+            let path_as_string = match path.file_name() {
+                Some(name) => name.to_string_lossy().to_string(),
+                None => {
+                    eprintln!(
+                        "Warning: could not determine collection name for '{}'",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
 
             let collection = collections
-                .entry(path_as_string.to_string())
+                .entry(path_as_string)
                 .or_insert(MarkdownCollection::new(path));
 
             collection.collection.push(markdown_content);
