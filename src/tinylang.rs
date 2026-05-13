@@ -98,3 +98,182 @@ pub fn reverse(arguments: FuncArguments, _state: &State) -> TinyLangType {
 
     TinyLangType::Vec(collection)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_obj(key: &str, val: &str) -> TinyLangType {
+        let mut state = State::new();
+        state.insert(key.to_string(), TinyLangType::String(val.to_string()));
+        TinyLangType::Object(state)
+    }
+
+    fn extract_str(item: &TinyLangType, key: &str) -> String {
+        if let TinyLangType::Object(o) = item {
+            if let Some(TinyLangType::String(s)) = o.get(key) {
+                return s.clone();
+            }
+        }
+        panic!("expected string at key {key}");
+    }
+
+    #[test]
+    fn test_sort_by_key_basic() {
+        let collection = TinyLangType::Vec(vec![
+            make_obj("name", "Charlie"),
+            make_obj("name", "Alice"),
+            make_obj("name", "Bob"),
+        ]);
+        let result = sort_by_key(
+            vec![collection, TinyLangType::String("name".into())],
+            &State::new(),
+        );
+        let TinyLangType::Vec(items) = result else {
+            panic!("expected vec");
+        };
+        let names: Vec<String> = items.iter().map(|i| extract_str(i, "name")).collect();
+        assert_eq!(names, vec!["Alice", "Bob", "Charlie"]);
+    }
+
+    #[test]
+    fn test_sort_by_key_reversed() {
+        let collection = TinyLangType::Vec(vec![
+            make_obj("name", "Alice"),
+            make_obj("name", "Charlie"),
+            make_obj("name", "Bob"),
+        ]);
+        let result = sort_by_key(
+            vec![
+                collection,
+                TinyLangType::String("name".into()),
+                TinyLangType::String("reversed".into()),
+            ],
+            &State::new(),
+        );
+        let TinyLangType::Vec(items) = result else {
+            panic!("expected vec");
+        };
+        let names: Vec<String> = items.iter().map(|i| extract_str(i, "name")).collect();
+        assert_eq!(names, vec!["Charlie", "Bob", "Alice"]);
+    }
+
+    #[test]
+    fn test_sort_by_key_insufficient_args() {
+        let result = sort_by_key(vec![TinyLangType::String("x".into())], &State::new());
+        assert!(result == TinyLangType::Nil);
+    }
+
+    #[test]
+    fn test_sort_by_key_wrong_type() {
+        let result = sort_by_key(
+            vec![TinyLangType::Numeric(1.0), TinyLangType::String("k".into())],
+            &State::new(),
+        );
+        assert!(result == TinyLangType::Nil);
+    }
+
+    #[test]
+    fn test_paginate_basic() {
+        let items = TinyLangType::Vec((1..=10).map(|i| TinyLangType::Numeric(i as f64)).collect());
+        let result = paginate(
+            vec![
+                items,
+                TinyLangType::Numeric(2.0),
+                TinyLangType::Numeric(3.0),
+            ],
+            &State::new(),
+        );
+        let TinyLangType::Vec(page) = result else {
+            panic!("expected vec");
+        };
+        assert_eq!(page.len(), 3);
+        assert!(page[0] == TinyLangType::Numeric(4.0));
+        assert!(page[2] == TinyLangType::Numeric(6.0));
+    }
+
+    #[test]
+    fn test_paginate_last_page_partial() {
+        let items = TinyLangType::Vec((1..=5).map(|i| TinyLangType::Numeric(i as f64)).collect());
+        let result = paginate(
+            vec![
+                items,
+                TinyLangType::Numeric(2.0),
+                TinyLangType::Numeric(3.0),
+            ],
+            &State::new(),
+        );
+        let TinyLangType::Vec(page) = result else {
+            panic!("expected vec");
+        };
+        assert_eq!(page.len(), 2);
+    }
+
+    #[test]
+    fn test_paginate_page_out_of_bounds() {
+        let items = TinyLangType::Vec((1..=3).map(|i| TinyLangType::Numeric(i as f64)).collect());
+        let result = paginate(
+            vec![
+                items,
+                TinyLangType::Numeric(5.0),
+                TinyLangType::Numeric(3.0),
+            ],
+            &State::new(),
+        );
+        let TinyLangType::Vec(page) = result else {
+            panic!("expected empty vec, got non-vec");
+        };
+        assert!(page.is_empty());
+    }
+
+    #[test]
+    fn test_paginate_zero_page_returns_nil() {
+        let items = TinyLangType::Vec(vec![TinyLangType::Numeric(1.0)]);
+        let result = paginate(
+            vec![
+                items,
+                TinyLangType::Numeric(0.0),
+                TinyLangType::Numeric(3.0),
+            ],
+            &State::new(),
+        );
+        assert!(result == TinyLangType::Nil);
+    }
+
+    #[test]
+    fn test_paginate_insufficient_args() {
+        let result = paginate(vec![TinyLangType::Numeric(1.0)], &State::new());
+        assert!(result == TinyLangType::Nil);
+    }
+
+    #[test]
+    fn test_reverse_basic() {
+        let items = TinyLangType::Vec(vec![
+            TinyLangType::Numeric(1.0),
+            TinyLangType::Numeric(2.0),
+            TinyLangType::Numeric(3.0),
+        ]);
+        let TinyLangType::Vec(result) = reverse(vec![items], &State::new()) else {
+            panic!("expected vec");
+        };
+        assert_eq!(result.len(), 3);
+        assert!(result[0] == TinyLangType::Numeric(3.0));
+        assert!(result[1] == TinyLangType::Numeric(2.0));
+        assert!(result[2] == TinyLangType::Numeric(1.0));
+    }
+
+    #[test]
+    fn test_reverse_empty() {
+        let items = TinyLangType::Vec(vec![]);
+        let TinyLangType::Vec(result) = reverse(vec![items], &State::new()) else {
+            panic!("expected vec");
+        };
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_reverse_wrong_type() {
+        let result = reverse(vec![TinyLangType::String("x".into())], &State::new());
+        assert!(result == TinyLangType::Nil);
+    }
+}

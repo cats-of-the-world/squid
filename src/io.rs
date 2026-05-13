@@ -222,11 +222,12 @@ mod test {
     }
 
     fn iters_equal_any_order<T: Eq + Hash>(
-        mut i1: impl Iterator<Item = T>,
+        i1: impl Iterator<Item = T>,
         i2: impl Iterator<Item = T>,
     ) -> bool {
         let set: HashSet<T> = i2.collect();
-        i1.all(|x| set.contains(&x))
+        let vec: Vec<T> = i1.collect();
+        vec.len() == set.len() && vec.into_iter().all(|x| set.contains(&x))
     }
 
     #[test]
@@ -290,5 +291,23 @@ mod test {
             checks += 1;
         }
         assert_eq!(10, checks);
+    }
+
+    #[test]
+    fn test_reader_excludes_wrong_extension() {
+        let tempdir = TempDir::new("templates").unwrap();
+        create_random_template_files(tempdir.path(), 3);
+        for i in 0..2 {
+            File::create(tempdir.path().join(format!("file{}.html", i))).unwrap();
+        }
+        let reader = LazyFolderReader::new(tempdir.path(), "template").unwrap();
+        assert_eq!(3, reader.files.len());
+    }
+
+    #[test]
+    fn test_reader_empty_dir() {
+        let tempdir = TempDir::new("templates").unwrap();
+        let reader = LazyFolderReader::new(tempdir.path(), "template").unwrap();
+        assert!(reader.files.is_empty());
     }
 }

@@ -216,4 +216,74 @@ excerpt: Test excerpt
         assert_eq!(metadata.tags, vec!["rust", "blogging"]);
         assert_eq!(metadata.file_name, "/posts/test-post");
     }
+
+    #[test]
+    fn test_markdown_document_no_frontmatter() {
+        let content = "# Hello\nNo front matter here.";
+        let doc = MarkdownDocument::new(content, "file.md".into(), "/posts/file".into()).unwrap();
+        assert!(doc.header.is_empty());
+        assert!(doc.html_content.contains("Hello"));
+    }
+
+    #[test]
+    fn test_to_post_metadata_rfc2822_date() {
+        let content = r#"---
+title: Post
+date: Wed, 10 Jan 2024 10:00:00 +0000
+---
+Content"#;
+        let doc = MarkdownDocument::new(content, "p.md".into(), "/p".into()).unwrap();
+        let meta = doc.to_post_metadata().unwrap();
+        assert_eq!(meta.date.format("%Y-%m-%d").to_string(), "2024-01-10");
+    }
+
+    #[test]
+    fn test_to_post_metadata_simple_date() {
+        let content = r#"---
+title: Post
+date: 2024-03-15
+---
+Content"#;
+        let doc = MarkdownDocument::new(content, "p.md".into(), "/p".into()).unwrap();
+        let meta = doc.to_post_metadata().unwrap();
+        assert_eq!(meta.date.format("%Y-%m-%d").to_string(), "2024-03-15");
+    }
+
+    #[test]
+    fn test_to_post_metadata_description_fallback() {
+        let content = r#"---
+title: Post
+description: From description field
+---
+Content"#;
+        let doc = MarkdownDocument::new(content, "p.md".into(), "/p".into()).unwrap();
+        let meta = doc.to_post_metadata().unwrap();
+        assert_eq!(meta.excerpt, "From description field");
+    }
+
+    #[test]
+    fn test_to_post_metadata_content_derived_excerpt() {
+        let content = r#"---
+title: Post
+---
+First paragraph of content."#;
+        let doc = MarkdownDocument::new(content, "p.md".into(), "/p".into()).unwrap();
+        let meta = doc.to_post_metadata().unwrap();
+        assert!(!meta.excerpt.is_empty());
+    }
+
+    #[test]
+    fn test_as_tinylang_state() {
+        let content = r#"---
+title: My Title
+custom_key: custom_value
+---
+# Body"#;
+        let doc = MarkdownDocument::new(content, "f.md".into(), "/f".into()).unwrap();
+        let state = doc.as_tinylang_state();
+        assert!(state.contains_key("title"));
+        assert!(state.contains_key("content"));
+        assert!(state.contains_key("partial_uri"));
+        assert!(state.contains_key("custom_key"));
+    }
 }

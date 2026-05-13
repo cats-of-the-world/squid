@@ -56,6 +56,15 @@ fn test_creates_basic_output() {
     let expected = read_folder_contents(Path::new("tests/output/"));
 
     assert!(!created.is_empty());
+    for key in expected.keys() {
+        if key == "rss.xml" {
+            continue;
+        }
+        assert!(
+            created.contains_key(key.as_str()),
+            "expected file {key} was not created"
+        );
+    }
     for (key, value) in created {
         let expected_content = match expected.get(&key) {
             Some(t) => t,
@@ -106,7 +115,9 @@ async fn test_watches() {
 
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let path = tempdir.into_path().join("hello.txt");
-        while !path.exists() {}
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         true
     })
     .await
