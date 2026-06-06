@@ -149,6 +149,9 @@ pub(crate) async fn write_to_disk(dir: PathBuf, file_name: &str, output: String)
     file.write_all(output.as_bytes())
         .await
         .with_context(|| format!("failed to write file '{}'", output_file.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("failed to flush file '{}'", output_file.display()))?;
     Ok(())
 }
 //based on https://stackoverflow.com/questions/26958489/how-to-copy-a-folder-recursively-in-rust
@@ -291,6 +294,66 @@ mod test {
             checks += 1;
         }
         assert_eq!(10, checks);
+    }
+
+    #[tokio::test]
+    async fn test_write_to_disk_creates_file() {
+        let tempdir = TempDir::new("write_test").unwrap();
+        write_to_disk(
+            tempdir.path().to_path_buf(),
+            "hello.txt",
+            "hello world".to_string(),
+        )
+        .await
+        .unwrap();
+        let content = std::fs::read_to_string(tempdir.path().join("hello.txt")).unwrap();
+        assert_eq!(content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_write_to_disk_creates_nested_dirs() {
+        let tempdir = TempDir::new("write_test").unwrap();
+        let subdir = tempdir.path().join("a/b/c");
+        write_to_disk(subdir.clone(), "file.txt", "data".to_string())
+            .await
+            .unwrap();
+        assert!(subdir.join("file.txt").exists());
+    }
+
+    #[test]
+    fn test_copy_dir_flat() {
+        let src = TempDir::new("src").unwrap();
+        let dst = TempDir::new("dst").unwrap();
+        std::fs::write(src.path().join("a.txt"), "hello").unwrap();
+        std::fs::write(src.path().join("b.txt"), "world").unwrap();
+        copy_dir(src.path(), dst.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("a.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("b.txt")).unwrap(),
+            "world"
+        );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive() {
+        let src = TempDir::new("src").unwrap();
+        let dst = TempDir::new("dst").unwrap();
+        std::fs::write(src.path().join("root.txt"), "root").unwrap();
+        let subdir = src.path().join("sub");
+        create_dir(&subdir).unwrap();
+        std::fs::write(subdir.join("nested.txt"), "nested").unwrap();
+        copy_dir(src.path(), dst.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("root.txt")).unwrap(),
+            "root"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("sub/nested.txt")).unwrap(),
+            "nested"
+        );
     }
 
     #[test]

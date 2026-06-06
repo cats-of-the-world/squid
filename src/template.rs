@@ -857,3 +857,61 @@ impl Website {
         state
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_page_file_name_page_one() {
+        assert_eq!(page_file_name("index", 1), "index.html");
+    }
+
+    #[test]
+    fn test_page_file_name_subsequent_pages() {
+        assert_eq!(page_file_name("index", 2), "index-page-2.html");
+        assert_eq!(page_file_name("index", 10), "index-page-10.html");
+    }
+
+    #[test]
+    fn test_total_pages_for_empty_collections() {
+        let collections: HashMap<String, MarkdownCollection> = HashMap::new();
+        assert_eq!(total_pages_for(&collections, 5), 1);
+    }
+
+    #[test]
+    fn test_total_pages_for_exact_multiple() {
+        let mut collections = HashMap::new();
+        let mut coll = MarkdownCollection::new(PathBuf::from("posts"));
+        for i in 0..6 {
+            coll.collection.push(
+                crate::md::MarkdownDocument::new(
+                    &format!("---\ntitle: Post {i}\n---\ncontent"),
+                    format!("post{i}.md"),
+                    format!("/posts/post{i}"),
+                )
+                .unwrap(),
+            );
+        }
+        collections.insert("posts".to_string(), coll);
+        assert_eq!(total_pages_for(&collections, 3), 2);
+    }
+
+    #[test]
+    fn test_total_pages_for_partial_last_page() {
+        let mut collections = HashMap::new();
+        let mut coll = MarkdownCollection::new(PathBuf::from("posts"));
+        for i in 0..7 {
+            coll.collection.push(
+                crate::md::MarkdownDocument::new(
+                    &format!("---\ntitle: Post {i}\n---\ncontent"),
+                    format!("post{i}.md"),
+                    format!("/posts/post{i}"),
+                )
+                .unwrap(),
+            );
+        }
+        collections.insert("posts".to_string(), coll);
+        assert_eq!(total_pages_for(&collections, 3), 3);
+    }
+}
