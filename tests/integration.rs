@@ -8,7 +8,6 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use tempdir::TempDir;
-use tokio::signal;
 
 fn read_folder_contents(folder_path: &Path) -> HashMap<String, String> {
     let mut contents = HashMap::new();
@@ -167,6 +166,76 @@ async fn test_webserver() {
     assert_eq!(200, resp.status());
 
     kill_child(&cargo_bin.id().to_string())
+}
+
+#[test]
+fn test_init_command_creates_structure() {
+    let tempdir = TempDir::new("init_test").unwrap();
+    Command::cargo_bin("squid")
+        .unwrap()
+        .arg("init")
+        .current_dir(tempdir.path())
+        .assert()
+        .success();
+
+    assert!(tempdir.path().join("config.toml").exists());
+    assert!(tempdir.path().join("templates").is_dir());
+    assert!(tempdir.path().join("static").is_dir());
+    assert!(tempdir.path().join("output").is_dir());
+    assert!(tempdir.path().join("markdown/posts").is_dir());
+    assert!(tempdir.path().join("templates/index.template").exists());
+    assert!(tempdir.path().join("templates/_posts.template").exists());
+    assert!(tempdir
+        .path()
+        .join("markdown/posts/hello-world.md")
+        .exists());
+
+    let config = fs::read_to_string(tempdir.path().join("config.toml")).unwrap();
+    assert!(config.contains("website_name"));
+}
+
+#[test]
+fn test_init_command_skips_existing_files() {
+    let tempdir = TempDir::new("init_test").unwrap();
+    let config_path = tempdir.path().join("config.toml");
+    fs::write(&config_path, "original content").unwrap();
+
+    Command::cargo_bin("squid")
+        .unwrap()
+        .arg("init")
+        .current_dir(tempdir.path())
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        "original content"
+    );
+}
+
+#[test]
+fn test_new_command_creates_markdown_file() {
+    let tempdir = TempDir::new("new_test").unwrap();
+    let md_folder = tempdir.path().join("markdown");
+    fs::create_dir(&md_folder).unwrap();
+
+    Command::cargo_bin("squid")
+        .unwrap()
+        .args([
+            "--markdown-folder",
+            md_folder.to_str().unwrap(),
+            "new",
+            "posts",
+            "my-first-post",
+        ])
+        .assert()
+        .success();
+
+    let post_path = md_folder.join("posts/my-first-post.md");
+    assert!(post_path.exists());
+    let content = fs::read_to_string(&post_path).unwrap();
+    assert!(content.contains("my first post"));
+    assert!(content.contains("date:"));
 }
 
 fn kill_child(child_id: &str) {

@@ -286,3 +286,213 @@ impl DependencyGraph {
             .flat_map(|(template, outputs)| outputs.iter().map(move |out| (template, out)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_graph() -> DependencyGraph {
+        DependencyGraph::new(PathBuf::from("/templates"), PathBuf::from("/output"))
+    }
+
+    #[test]
+    fn test_parse_render_calls_single_quotes() {
+        let calls = DependencyGraph::parse_render_calls("{{ render('partial.html') }}");
+        assert_eq!(calls, vec!["partial.html"]);
+    }
+
+    #[test]
+    fn test_parse_render_calls_double_quotes() {
+        let calls = DependencyGraph::parse_render_calls(r#"{{ render("header.html") }}"#);
+        assert_eq!(calls, vec!["header.html"]);
+    }
+
+    #[test]
+    fn test_parse_render_calls_multiple() {
+        let calls = DependencyGraph::parse_render_calls(
+            "{{ render('header.html') }} body {{ render('footer.html') }}",
+        );
+        assert_eq!(calls.len(), 2);
+        assert!(calls.contains(&"header.html".to_string()));
+        assert!(calls.contains(&"footer.html".to_string()));
+    }
+
+    #[test]
+    fn test_parse_render_calls_none() {
+        assert!(DependencyGraph::parse_render_calls("<h1>plain content</h1>").is_empty());
+    }
+
+    #[test]
+    fn test_requires_full_rebuild_config() {
+        let graph = make_graph();
+        let change = FileChangeEvent {
+            change_type: FileChangeType::Config,
+            paths: vec![PathBuf::from("/config.toml")],
+        };
+        assert!(graph.requires_full_rebuild(&change));
+    }
+
+    #[test]
+    fn test_requires_full_rebuild_template_is_false() {
+        let graph = make_graph();
+        let change = FileChangeEvent {
+            change_type: FileChangeType::Template,
+            paths: vec![PathBuf::from("/templates/index.template")],
+        };
+        assert!(!graph.requires_full_rebuild(&change));
+    }
+
+    #[test]
+    fn test_is_static_change() {
+        let graph = make_graph();
+        let static_change = FileChangeEvent {
+            change_type: FileChangeType::Static,
+            paths: vec![PathBuf::from("/static/style.css")],
+        };
+        assert!(graph.is_static_change(&static_change));
+        let template_change = FileChangeEvent {
+            change_type: FileChangeType::Template,
+            paths: vec![PathBuf::from("/templates/index.template")],
+        };
+        assert!(!graph.is_static_change(&template_change));
+    }
+
+    #[test]
+    fn test_affected_outputs_markdown_change() {
+        let mut graph = make_graph();
+        let md = PathBuf::from("/markdown/posts/post1.md");
+        let out = PathBuf::from("/output/posts/post1.html");
+        graph.register_markdown_output(md.clone(), "posts", out.clone());
+
+        let change = FileChangeEvent {
+            change_type: FileChangeType::Markdown,
+            paths: vec![md],
+        };
+        let affected = graph.affected_outputs(&change);
+        assert_eq!(affected.len(), 1);
+        assert!(affected.contains(&out));
+    }
+
+    #[test]
+    fn test_affected_outputs_unregistered_markdown_is_empty() {
+        let graph = make_graph();
+        let change = FileChangeEvent {
+            change_type: FileChangeType::Markdown,
+            paths: vec![PathBuf::from("/markdown/posts/unknown.md")],
+        };
+        assert!(graph.affected_outputs(&change).is_empty());
+    }
+
+    #[test]
+    fn test_affected_outputs_static_is_empty() {
+        let graph = make_graph();
+        let change = FileChangeEvent {
+            change_type: FileChangeType::Static,
+            paths: vec![PathBuf::from("/static/style.css")],
+        };
+        assert!(graph.affected_outputs(&change).is_empty());
+    }
+
+    #[test]
+    fn test_affected_outputs_standalone_template() {
+        let mut graph = make_graph();
+        let template = PathBuf::from("/templates/index.template");
+        graph.register_standalone(template.clone(), "index.html");
+
+        let change = FileChangeEvent {
+            change_type: FileChangeType::Template,
+            paths: vec![template],
+        };
+        let affected = graph.affected_outputs(&change);
+        assert!(affected.contains(&PathBuf::from("/output/index.html")));
+    }
+
+    #[test]
+    fn test_affected_outputs_partial_change_rebuilds_collection() {
+        let mut graph = make_graph();
+        let partial = PathBuf::from("/templates/_posts.template");
+        let md = PathBuf::from("/markdown/posts/post1.md");
+        let out = PathBuf::from("/output/posts/post1.html");
+        graph.register_collection_partial("posts", partial.clone());
+        graph.register_markdown_output(md, "posts", out.clone());
+
+        let change = FileChangeEvent {
+            change_type: FileChangeType::Template,
+            paths: vec![partial],
+        };
+        assert!(graph.affected_outputs(&change).contains(&out));
+    }
+
+    #[test]
+    fn test_template_for_output() {
+        let mut graph = make_graph();
+        let template = PathBuf::from("/templates/index.template");
+        graph.register_standalone(template.clone(), "index.html");
+
+        assert_eq!(
+            graph.template_for_output(&PathBuf::from("/output/index.html")),
+            Some(template)
+        );
+        assert!(graph
+            .template_for_output(&PathBuf::from("/output/other.html"))
+            .is_none());
+    }
+
+    #[test]
+    fn test_markdown_for_output() {
+        let mut graph = make_graph();
+        let md = PathBuf::from("/markdown/posts/post1.md");
+        let out = PathBuf::from("/output/posts/post1.html");
+        graph.register_markdown_output(md.clone(), "posts", out.clone());
+
+        let (md_back, coll) = graph.markdown_for_output(&out).unwrap();
+        assert_eq!(md_back, md);
+        assert_eq!(coll, "posts");
+        assert!(graph
+            .markdown_for_output(&PathBuf::from("/output/posts/other.html"))
+            .is_none());
+    }
+
+    #[test]
+    fn test_partial_for_collection() {
+        let mut graph = make_graph();
+        let partial = PathBuf::from("/templates/_posts.template");
+        graph.register_collection_partial("posts", partial.clone());
+
+        assert_eq!(graph.partial_for_collection("posts"), Some(partial));
+        assert!(graph.partial_for_collection("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_knows_markdown() {
+        let mut graph = make_graph();
+        let md = PathBuf::from("/markdown/posts/post1.md");
+        graph.register_markdown_output(
+            md.clone(),
+            "posts",
+            PathBuf::from("/output/posts/post1.html"),
+        );
+        assert!(graph.knows_markdown(&md));
+        assert!(!graph.knows_markdown(&PathBuf::from("/markdown/posts/other.md")));
+    }
+
+    #[test]
+    fn test_page_number_registration() {
+        let mut graph = make_graph();
+        let out = PathBuf::from("/output/index-page-2.html");
+        graph.register_page_number(out.clone(), 2);
+
+        assert_eq!(graph.page_for_output(&out), Some(2));
+        assert!(graph
+            .page_for_output(&PathBuf::from("/output/index.html"))
+            .is_none());
+    }
+
+    #[test]
+    fn test_standalones_count() {
+        let mut graph = make_graph();
+        graph.register_standalone(PathBuf::from("/templates/index.template"), "index.html");
+        graph.register_standalone(PathBuf::from("/templates/about.template"), "about.html");
+        assert_eq!(graph.standalones().count(), 2);
+    }
+}
