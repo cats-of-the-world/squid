@@ -5,7 +5,6 @@ pub struct FeedConfig {
     pub title: String,
     pub description: String,
     pub website_url: String,
-    pub feed_url: String,
     pub language: String,
 }
 
@@ -55,7 +54,7 @@ pub fn generate_rss(
     let channel = ChannelBuilder::default()
         .title(config.title.clone())
         .description(config.description.clone())
-        .link(config.feed_url.clone())
+        .link(config.website_url.clone())
         .items(items)
         .language(Some(config.language.clone()))
         .last_build_date(Some(Utc::now().to_rfc2822()))
@@ -77,7 +76,6 @@ mod tests {
             title: "My Blog".to_string(),
             description: "A test blog".to_string(),
             website_url: "https://example.com".to_string(),
-            feed_url: "https://example.com/rss.xml".to_string(),
             language: "en-us".to_string(),
         }
     }

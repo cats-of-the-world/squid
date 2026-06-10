@@ -74,6 +74,16 @@ fn paginated_state(
     state
 }
 
+/// Replace `from` with `to` only when it is the suffix of `name`, unlike
+/// `str::replace` which would also rewrite occurrences in the middle of the
+/// name (e.g. `amd.md` must become `amd.html`, not `ahtml.html`).
+fn swap_suffix(name: &str, from: &str, to: &str) -> String {
+    match name.strip_suffix(from) {
+        Some(stem) => format!("{stem}{to}"),
+        None => name.to_string(),
+    }
+}
+
 fn page_file_name(base_name: &str, page: usize) -> String {
     if page == 1 {
         format!("{base_name}.html")
@@ -88,8 +98,13 @@ fn total_pages_for(collections: &HashMap<String, MarkdownCollection>, per_page: 
         .map(|c| c.collection.len())
         .max()
         .unwrap_or(0);
-    ((max_items + per_page - 1) / per_page).max(1)
+    max_items.div_ceil(per_page).max(1)
 }
+
+/// Rebuild plan entry for a markdown output: (partial template path, output path, item state).
+type MarkdownRebuildItem = (PathBuf, PathBuf, State);
+/// Rebuild plan entry for a standalone output: (template path, output path, page number).
+type StandaloneRebuildItem = (PathBuf, PathBuf, Option<usize>);
 
 struct Builder {
     tinylang_state: Arc<State>,
@@ -168,7 +183,7 @@ impl Builder {
 
     /// build a template without any markdown
     fn eval_template_to_output_file(&mut self, file: TemplateFile) {
-        let base_name = file.name.replace(".template", "");
+        let base_name = swap_suffix(&file.name, ".template", "");
 
         match self.posts_per_page {
             Some(per_page) if per_page > 0 => {
@@ -254,7 +269,7 @@ impl Builder {
                         .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
 
                     // we need to save our file following the markdown file and not the template
-                    let file_name = item.name.replace(".md", ".html");
+                    let file_name = swap_suffix(&item.name, ".md", ".html");
 
                     io::write_to_disk(output_folder, &file_name, html).await?;
                     Ok(file_name)
@@ -308,22 +323,7 @@ impl Website {
 
         let collections = self.build_markdown_collections().await?;
 
-        if let Some(c) = self.configuration.clone() {
-            let feed_config = FeedConfig {
-                title: c.website_name.clone(),
-                description: c
-                    .custom_keys
-                    .get("description")
-                    .cloned()
-                    .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
-                website_url: c.uri.clone(),
-                feed_url: format!("{}/rss.xml", c.uri),
-                language: c
-                    .custom_keys
-                    .get("language")
-                    .cloned()
-                    .unwrap_or_else(|| "en-us".to_string()),
-            };
+        if let Some(feed_config) = self.feed_config() {
             self.generate_site_rss(&feed_config, &collections, output)
                 .await?;
         }
@@ -337,6 +337,24 @@ impl Website {
         ));
 
         self.compile_templates().await
+    }
+
+    fn feed_config(&self) -> Option<FeedConfig> {
+        let c = self.configuration.as_ref()?;
+        Some(FeedConfig {
+            title: c.website_name.clone(),
+            description: c
+                .custom_keys
+                .get("description")
+                .cloned()
+                .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
+            website_url: c.uri.clone(),
+            language: c
+                .custom_keys
+                .get("language")
+                .cloned()
+                .unwrap_or_else(|| "en-us".to_string()),
+        })
     }
 
     async fn generate_site_rss(
@@ -375,41 +393,17 @@ impl Website {
         let collections = self.build_markdown_collections().await?;
 
         // Refresh RSS with updated collection data
-        if let Some(c) = self.configuration.clone() {
-            let feed_config = FeedConfig {
-                title: c.website_name.clone(),
-                description: c
-                    .custom_keys
-                    .get("description")
-                    .cloned()
-                    .unwrap_or_else(|| format!("Latest posts from {}", c.website_name)),
-                website_url: c.uri.clone(),
-                feed_url: format!("{}/rss.xml", c.uri),
-                language: c
-                    .custom_keys
-                    .get("language")
-                    .cloned()
-                    .unwrap_or_else(|| "en-us".to_string()),
-            };
-            let all_posts: Vec<_> = collections
-                .values()
-                .flat_map(|col| {
-                    col.collection
-                        .iter()
-                        .filter_map(|d| d.to_post_metadata().ok())
-                })
-                .collect();
-            generate_rss(&feed_config, &all_posts, output).context("Failed to generate RSS")?;
+        if let Some(feed_config) = self.feed_config() {
+            self.generate_site_rss(&feed_config, &collections, output)
+                .await?;
         }
 
         let state = self.build_state(&collections);
 
         // Collect the rebuild plan from the dep graph before releasing borrows.
-        // Each markdown entry: (partial_template_path, output_path, item_tinylang_state)
-        // Each standalone entry: (template_path, output_path, page_number)
         let (markdown_items, standalone_items): (
-            Vec<(PathBuf, PathBuf, tinylang::types::State)>,
-            Vec<(PathBuf, PathBuf, Option<usize>)>,
+            Vec<MarkdownRebuildItem>,
+            Vec<StandaloneRebuildItem>,
         ) = {
             let deps = self.cache.deps.as_ref().context("no dependency graph")?;
             let collections_ref = self
@@ -454,7 +448,7 @@ impl Website {
                 }
             }
 
-            let standalone_items: Vec<(PathBuf, PathBuf, Option<usize>)> = deps
+            let standalone_items: Vec<StandaloneRebuildItem> = deps
                 .standalones()
                 .map(|(t, o)| (t.clone(), o.clone(), deps.page_for_output(o)))
                 .collect();
@@ -505,11 +499,14 @@ impl Website {
             let s = match (posts_per_page.filter(|&p| p > 0), page_opt) {
                 (Some(per_page), Some(page)) => {
                     let total = total_pages_for(&collections, per_page);
-                    let base_name = template_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .replace(".template", "");
+                    let base_name = swap_suffix(
+                        template_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(""),
+                        ".template",
+                        "",
+                    );
                     paginated_state(&state, &collections, &base_name, page, total, per_page)
                 }
                 _ => state.clone(),
@@ -590,7 +587,7 @@ impl Website {
                     deps.register_collection_partial(collection_name, file.path.clone());
                 }
             } else if let Some(per_page) = posts_per_page.filter(|&p| p > 0) {
-                let base_name = file.name.replace(".template", "");
+                let base_name = swap_suffix(&file.name, ".template", "");
                 let total = total_pages_for(collections, per_page);
                 for page in 1..=total {
                     let output_name = page_file_name(&base_name, page);
@@ -599,7 +596,7 @@ impl Website {
                     deps.register_page_number(output_path, page);
                 }
             } else {
-                let output_name = file.name.replace(".template", ".html");
+                let output_name = swap_suffix(&file.name, ".template", ".html");
                 deps.register_standalone(file.path.clone(), &output_name);
             }
         }
@@ -615,7 +612,7 @@ impl Website {
             );
             for item in &collection.collection {
                 let md_path = collection.relative_path.join(&item.name);
-                let output_name = item.name.replace(".md", ".html");
+                let output_name = swap_suffix(&item.name, ".md", ".html");
                 let output_path = output_dir.join(&output_name);
                 deps.register_markdown_output(md_path, collection_name, output_path);
             }
@@ -681,11 +678,14 @@ impl Website {
                 ) {
                     (Some(per_page), Some(page)) => {
                         let total = total_pages_for(collections, per_page);
-                        let base_name = template_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .replace(".template", "");
+                        let base_name = swap_suffix(
+                            template_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(""),
+                            ".template",
+                            "",
+                        );
                         paginated_state(state, collections, &base_name, page, total, per_page)
                     }
                     _ => state.clone(),
@@ -797,19 +797,15 @@ impl Website {
     }
 
     fn partial_uri(&self, path: &Path) -> String {
-        path.to_string_lossy()
-            .to_string()
-            // we leave only the relative path after the `posts_folder` to avoid
-            // creating a url with a local path (e.g. $HOME/my_site/posts)
-            .replace(
-                self.posts_folder
-                    .as_ref()
-                    .unwrap()
-                    .to_string_lossy()
-                    .as_ref(),
-                "",
-            )
-            .replace("md", "html")
+        // we leave only the relative path after the `posts_folder` to avoid
+        // creating a url with a local path (e.g. $HOME/my_site/posts)
+        let relative = self
+            .posts_folder
+            .as_ref()
+            .and_then(|folder| path.strip_prefix(folder).ok())
+            .unwrap_or(path);
+        let uri = swap_suffix(&relative.to_string_lossy(), ".md", ".html");
+        format!("/{}", uri.trim_start_matches('/'))
     }
 
     /// We need to transform all the information we build about the collections to the
@@ -852,7 +848,7 @@ impl Website {
         let mut state = self.build_default_state();
         // passes all the collections state as well so users can use it for
         // things like pagination
-        state.extend(self.build_collection_state(collections).into_iter());
+        state.extend(self.build_collection_state(collections));
         self.cache.state = Some(state.clone());
         state
     }
@@ -913,5 +909,39 @@ mod tests {
         }
         collections.insert("posts".to_string(), coll);
         assert_eq!(total_pages_for(&collections, 3), 3);
+    }
+
+    #[test]
+    fn test_swap_suffix_only_replaces_suffix() {
+        assert_eq!("amd.html", swap_suffix("amd.md", ".md", ".html"));
+        assert_eq!(
+            "my-md-notes.html",
+            swap_suffix("my-md-notes.md", ".md", ".html")
+        );
+        assert_eq!("index", swap_suffix("index.template", ".template", ""));
+        assert_eq!("no-extension", swap_suffix("no-extension", ".md", ".html"));
+    }
+
+    #[test]
+    fn test_partial_uri_strips_only_folder_prefix_and_extension() {
+        let website = Website::new(
+            None,
+            PathBuf::from("templates"),
+            Some(PathBuf::from("markdown")),
+        );
+
+        assert_eq!(
+            "/posts/hello.html",
+            website.partial_uri(Path::new("markdown/posts/hello.md"))
+        );
+        // file names containing the folder name or "md" must not be mangled
+        assert_eq!(
+            "/posts/markdown-tips.html",
+            website.partial_uri(Path::new("markdown/posts/markdown-tips.md"))
+        );
+        assert_eq!(
+            "/posts/amd.html",
+            website.partial_uri(Path::new("markdown/posts/amd.md"))
+        );
     }
 }

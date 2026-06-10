@@ -60,6 +60,12 @@ pub struct App {
     args: Args,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         Self {
@@ -96,7 +102,9 @@ impl App {
                 eprintln!("Error building website: {e:#}");
                 exit(1);
             });
-        self.copy_static_files(output_folder);
+        if self.copy_static_files(output_folder) {
+            exit(1);
+        }
 
         let mut async_server = None;
 
@@ -140,7 +148,9 @@ impl App {
         let mut website = Website::new(config, template_folder.to_path_buf(), markdown_folder);
         let mut files_processed = website.build_from_scratch(output_folder).await?;
 
-        Self::process_website_files(&mut files_processed).await;
+        if Self::process_website_files(&mut files_processed).await {
+            exit(1);
+        }
 
         Ok(website)
     }
@@ -266,7 +276,11 @@ language = "en-us"
         println!("Created '{}'", file_path.display());
     }
 
-    async fn process_website_files(files_processed: &mut JoinSet<Result<String>>) {
+    /// Awaits all file-processing tasks, reporting results. Returns true if any
+    /// file failed, leaving the exit decision to the caller: a failure during
+    /// the initial build is fatal, but in watch mode the process must keep
+    /// running so the user can fix the file and trigger another rebuild.
+    async fn process_website_files(files_processed: &mut JoinSet<Result<String>>) -> bool {
         let mut failed = false;
 
         while let Some(res) = files_processed.join_next().await {
@@ -285,12 +299,12 @@ language = "en-us"
             };
         }
 
-        if failed {
-            exit(1);
-        }
+        failed
     }
 
-    fn copy_static_files(&self, output_folder: &Path) {
+    /// Copies static resources into the output folder. Returns true on failure
+    /// so the initial build can abort while watch mode keeps running.
+    fn copy_static_files(&self, output_folder: &Path) -> bool {
         let static_resources = self
             .args
             .static_resources
@@ -303,10 +317,16 @@ language = "en-us"
                     "task failed, could not copy static resources {:?}",
                     e.to_string()
                 );
-                exit(1);
+                true
             }
-            Some(_) => println!("Copied static resources"),
-            _ => println!("No static resources to be copied over"),
+            Some(_) => {
+                println!("Copied static resources");
+                false
+            }
+            _ => {
+                println!("No static resources to be copied over");
+                false
+            }
         }
     }
 
@@ -375,11 +395,12 @@ language = "en-us"
                     }
                     Err(e) => {
                         eprintln!("Incremental markdown rebuild failed: {e}, falling back to full rebuild");
-                        if let Ok(mut files_processed) =
-                            website.build_from_scratch(output_folder).await
-                        {
-                            Self::process_website_files(&mut files_processed).await;
-                            self.copy_static_files(output_folder);
+                        match website.build_from_scratch(output_folder).await {
+                            Ok(mut files_processed) => {
+                                Self::process_website_files(&mut files_processed).await;
+                                self.copy_static_files(output_folder);
+                            }
+                            Err(e) => eprintln!("Full rebuild failed: {e:#}"),
                         }
                     }
                 }

@@ -138,7 +138,7 @@ impl MarkdownDocument {
                     .filter(|s| !s.is_empty())
                     .collect()
             })
-            .unwrap_or_else(Vec::new);
+            .unwrap_or_default();
 
         Ok(crate::rss::PostMetadata {
             title: self.header.get("title").cloned().unwrap_or_default(),
