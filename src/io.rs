@@ -139,10 +139,13 @@ impl<'a> IntoIterator for &'a LazyFolderReader {
 }
 
 pub(crate) async fn write_to_disk(dir: PathBuf, file_name: &str, output: String) -> Result<()> {
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .with_context(|| format!("failed to create directory '{}'", dir.display()))?;
     let output_file = dir.join(file_name);
+    // file_name may contain sub-directories (e.g. "my-post/index.html" with
+    // pretty urls), so create the full parent chain of the final file
+    let parent = output_file.parent().unwrap_or(&dir);
+    tokio::fs::create_dir_all(parent)
+        .await
+        .with_context(|| format!("failed to create directory '{}'", parent.display()))?;
     let mut file = File::create(&output_file)
         .await
         .with_context(|| format!("failed to create file '{}'", output_file.display()))?;

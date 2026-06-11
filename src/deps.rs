@@ -52,6 +52,8 @@ pub struct DependencyGraph {
     output_page: HashMap<PathBuf, usize>,
     /// Output path -> (markdown_path, collection_name) for collection outputs
     output_to_markdown: HashMap<PathBuf, (PathBuf, String)>,
+    /// Output path -> tag name (only set for tag pages from _tag.template)
+    output_tag: HashMap<PathBuf, String>,
     /// All templates (for transitive closure)
     all_templates: HashSet<PathBuf>,
 }
@@ -68,6 +70,7 @@ impl DependencyGraph {
             standalone_outputs: HashMap::new(),
             output_to_template: HashMap::new(),
             output_to_markdown: HashMap::new(),
+            output_tag: HashMap::new(),
             all_templates: HashSet::new(),
             output_page: HashMap::new(),
         }
@@ -154,6 +157,21 @@ impl DependencyGraph {
     /// Return the 1-based page number for a paginated output, or None if not paginated.
     pub fn page_for_output(&self, path: &Path) -> Option<usize> {
         self.output_page.get(path).copied()
+    }
+
+    /// Mark an output as the page for a specific tag.
+    pub fn register_tag_output(&mut self, output_path: PathBuf, tag_name: &str) {
+        self.output_tag.insert(output_path, tag_name.to_string());
+    }
+
+    /// Return the tag name a tag-page output belongs to, or None.
+    pub fn tag_for_output(&self, path: &Path) -> Option<String> {
+        self.output_tag.get(path).cloned()
+    }
+
+    /// All tag names the graph generated pages for.
+    pub fn known_tags(&self) -> HashSet<String> {
+        self.output_tag.values().cloned().collect()
     }
 
     /// Register a collection partial (produces one output per markdown in collection).
@@ -277,6 +295,13 @@ impl DependencyGraph {
     /// Returns true if the given markdown path is tracked in the dependency graph.
     pub fn knows_markdown(&self, path: &Path) -> bool {
         self.markdown_outputs.contains_key(path)
+    }
+
+    /// Iterate all output paths the build produces (standalone and collection outputs).
+    pub fn all_outputs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.output_to_template
+            .keys()
+            .chain(self.output_to_markdown.keys())
     }
 
     /// Iterate all standalone template → output path pairs (one per output file).

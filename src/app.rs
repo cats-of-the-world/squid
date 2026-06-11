@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::exit;
 use tokio::runtime::Handle;
 use tokio::signal;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -51,6 +51,10 @@ pub(crate) struct Args {
 
     #[arg(short, long)]
     watch: bool,
+
+    /// Include draft posts (draft: true) and future-dated posts
+    #[arg(long)]
+    drafts: bool,
 
     #[arg(short = 'p', long)]
     serve: Option<u16>,
@@ -106,11 +110,15 @@ impl App {
             exit(1);
         }
 
+        // browsers subscribe to this channel (through the dev server) to
+        // auto-reload after each rebuild
+        let (reload_tx, _) = broadcast::channel(16);
+
         let mut async_server = None;
 
         if let Some(port) = self.args.serve.as_ref() {
             println!("Serving website at http://127.0.0.1:{port}");
-            async_server = Some(http::serve(*port, output_folder_str));
+            async_server = Some(http::serve(*port, output_folder_str, reload_tx.clone()));
         }
 
         if let Some(async_server) = async_server {
@@ -118,13 +126,13 @@ impl App {
             // on changes
             tokio::select! {
                 _ = async_server => {},
-                _ = self.watch_website_files(website) => {},
+                _ = self.watch_website_files(website, reload_tx) => {},
                 _ = signal::ctrl_c() => { println!("Stopping..."); }
             };
         } else if self.args.watch {
             println!("going to watch for change on files");
             tokio::select! {
-                _ = self.watch_website_files(website) => {},
+                _ = self.watch_website_files(website, reload_tx) => {},
                 _ = signal::ctrl_c() => { println!("Stopping..."); },
             };
         }
@@ -145,7 +153,8 @@ impl App {
             .as_ref()
             .map(|f| Path::new(&f).to_path_buf());
 
-        let mut website = Website::new(config, template_folder.to_path_buf(), markdown_folder);
+        let mut website = Website::new(config, template_folder.to_path_buf(), markdown_folder)
+            .with_drafts(self.args.drafts);
         let mut files_processed = website.build_from_scratch(output_folder).await?;
 
         if Self::process_website_files(&mut files_processed).await {
@@ -170,6 +179,15 @@ impl App {
                 "config.toml",
                 r#"website_name = "My Website"
 uri = "https://example.com"
+
+# directory-style urls (/posts/my-post/ instead of /posts/my-post.html)
+# pretty_urls = true
+
+# split listings into pages of this size
+# posts_per_page = 10
+
+# syntect theme for fenced code blocks ("none" disables highlighting)
+# code_theme = "InspiredGitHub"
 
 [custom_keys]
 description = "A website built with Squid"
@@ -211,9 +229,27 @@ language = "en-us"
 "#,
             ),
             (
+                "templates/_tag.template",
+                r#"<html>
+    <head>
+        <title>{{ tag.name }} - {{ website_name }}</title>
+    </head>
+    <body>
+        <h1>Posts tagged "{{ tag.name }}"</h1>
+        <ul>
+        {% for post in tag.items %}
+            <li><a href="{{ post.partial_uri }}">{{ post.title }}</a></li>
+        {% end %}
+        </ul>
+        <a href="/index.html">Back to home</a>
+    </body>
+</html>
+"#,
+            ),
+            (
                 "markdown/posts/hello-world.md",
                 &format!(
-                    "---\ntitle: Hello World\ndate: {}\nauthor: \n---\n\nWelcome to your new Squid website!\n",
+                    "---\ntitle: Hello World\ndate: {}\nauthor: \ntags: welcome\n---\n\nWelcome to your new Squid website!\n",
                     Local::now().format("%Y-%m-%d")
                 ),
             ),
@@ -332,7 +368,7 @@ language = "en-us"
 
     /// watches for change in the directories selected by the user
     /// in order to re-build the website
-    async fn watch_website_files(&self, mut website: Website) {
+    async fn watch_website_files(&self, mut website: Website, reload: broadcast::Sender<()>) {
         let (tx, mut rx) = mpsc::channel(1);
         let mut watcher = FolderWatcher::new(Handle::current(), tx);
 
@@ -372,6 +408,8 @@ language = "en-us"
             self.handle_file_change(&mut website, &change, output_folder)
                 .await;
             println!("Site rebuilt");
+            // no receivers (no browser connected) is fine
+            let _ = reload.send(());
         }
     }
 

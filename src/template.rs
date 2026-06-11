@@ -7,7 +7,10 @@ use anyhow::Context;
 use anyhow::Result;
 
 use crate::md::{MarkdownCollection, MarkdownDocument};
-use crate::tinylang::{paginate, render, reverse, sort_by_key};
+use crate::tinylang::{
+    date_format, group_by, limit, paginate, render, reverse, slugify, sort_by_key, truncate,
+    where_fn,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +26,7 @@ fn paginated_state(
     page: usize,
     total_pages: usize,
     per_page: usize,
+    pretty: bool,
 ) -> State {
     let mut state = base_state.clone();
 
@@ -48,12 +52,12 @@ fn paginated_state(
     }
 
     let next_file = if page < total_pages {
-        TinyLangType::String(page_file_name(base_name, page + 1))
+        TinyLangType::String(page_uri(base_name, page + 1, pretty))
     } else {
         TinyLangType::Nil
     };
     let prev_file = if page > 1 {
-        TinyLangType::String(page_file_name(base_name, page - 1))
+        TinyLangType::String(page_uri(base_name, page - 1, pretty))
     } else {
         TinyLangType::Nil
     };
@@ -84,11 +88,45 @@ fn swap_suffix(name: &str, from: &str, to: &str) -> String {
     }
 }
 
-fn page_file_name(base_name: &str, page: usize) -> String {
-    if page == 1 {
-        format!("{base_name}.html")
+/// Map a base name to its output file path. With pretty urls every page but
+/// the root index becomes a directory with an index.html inside.
+fn output_file_name(base_name: &str, pretty: bool) -> String {
+    if pretty && base_name != "index" {
+        format!("{base_name}/index.html")
     } else {
-        format!("{base_name}-page-{page}.html")
+        format!("{base_name}.html")
+    }
+}
+
+/// Output file name for a markdown source file ("hello.md").
+fn md_output_name(name: &str, pretty: bool) -> String {
+    output_file_name(name.strip_suffix(".md").unwrap_or(name), pretty)
+}
+
+fn page_base_name(base_name: &str, page: usize) -> String {
+    if page == 1 {
+        base_name.to_string()
+    } else {
+        format!("{base_name}-page-{page}")
+    }
+}
+
+fn page_file_name(base_name: &str, page: usize, pretty: bool) -> String {
+    output_file_name(&page_base_name(base_name, page), pretty)
+}
+
+/// The href templates should use to link a pagination page. Relative file
+/// names work when each page is a flat .html file, but pretty urls nest pages
+/// in directories, so the links must be absolute.
+fn page_uri(base_name: &str, page: usize, pretty: bool) -> String {
+    if !pretty {
+        return page_file_name(base_name, page, false);
+    }
+    let base = page_base_name(base_name, page);
+    if base == "index" {
+        "/".to_string()
+    } else {
+        format!("/{base}/")
     }
 }
 
@@ -103,8 +141,9 @@ fn total_pages_for(collections: &HashMap<String, MarkdownCollection>, per_page: 
 
 /// Rebuild plan entry for a markdown output: (partial template path, output path, item state).
 type MarkdownRebuildItem = (PathBuf, PathBuf, State);
-/// Rebuild plan entry for a standalone output: (template path, output path, page number).
-type StandaloneRebuildItem = (PathBuf, PathBuf, Option<usize>);
+/// Rebuild plan entry for a standalone output:
+/// (template path, output path, page number, tag name).
+type StandaloneRebuildItem = (PathBuf, PathBuf, Option<usize>, Option<String>);
 
 struct Builder {
     tinylang_state: Arc<State>,
@@ -112,6 +151,7 @@ struct Builder {
     eval_tasks: Option<JoinSet<anyhow::Result<String>>>,
     posts_per_page: Option<usize>,
     collections: Arc<HashMap<String, MarkdownCollection>>,
+    pretty_urls: bool,
 }
 
 impl Builder {
@@ -120,6 +160,7 @@ impl Builder {
         output_folder: PathBuf,
         posts_per_page: Option<usize>,
         collections: Arc<HashMap<String, MarkdownCollection>>,
+        pretty_urls: bool,
     ) -> Self {
         Self {
             tinylang_state: Arc::new(state),
@@ -127,6 +168,7 @@ impl Builder {
             eval_tasks: None,
             posts_per_page,
             collections,
+            pretty_urls,
         }
     }
 
@@ -148,6 +190,7 @@ impl Builder {
             page,
             total_pages,
             per_page,
+            self.pretty_urls,
         )
     }
 
@@ -161,6 +204,12 @@ impl Builder {
 
         while let Some(file) = template_folder_reader.async_next().await {
             let file = file?;
+
+            // _tag.template is reserved: it renders once per tag into tags/<slug>.html
+            if file.name == "_tag.template" {
+                self.eval_tag_pages(file).await?;
+                continue;
+            }
 
             // should handle _name.template differently since they are partials
             // for the rest of the templates we should generate a single output with same name
@@ -189,7 +238,7 @@ impl Builder {
             Some(per_page) if per_page > 0 => {
                 let total_pages = self.total_pages(per_page);
                 for page in 1..=total_pages {
-                    let file_name = page_file_name(&base_name, page);
+                    let file_name = page_file_name(&base_name, page, self.pretty_urls);
                     let state = self.build_paginated_state(&base_name, page, total_pages, per_page);
                     let output_folder = self.output_folder.to_path_buf();
                     let contents = file.contents.clone();
@@ -207,11 +256,12 @@ impl Builder {
             _ => {
                 let output_folder = self.output_folder.to_path_buf();
                 let state = self.tinylang_state.clone();
+                let pretty = self.pretty_urls;
                 self.eval_tasks
                     .as_mut()
                     .expect("eval_tasks initialized by process_folder")
                     .spawn(async move {
-                        let file_name = format!("{base_name}.html");
+                        let file_name = output_file_name(&base_name, pretty);
                         let html = eval(&file.contents, (*state).clone())
                             .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
                         io::write_to_disk(output_folder, &file_name, html).await?;
@@ -219,6 +269,44 @@ impl Builder {
                     });
             }
         }
+    }
+
+    /// renders the reserved _tag.template once per tag into tags/<slug>.html
+    async fn eval_tag_pages(&mut self, template: TemplateFile) -> Result<()> {
+        let tags = crate::tags::collect_tags(&self.collections, self.pretty_urls);
+        if tags.is_empty() {
+            return Ok(());
+        }
+
+        let output_folder = self.output_folder.join("tags");
+        if !output_folder.exists() {
+            create_dir(&output_folder).await.with_context(|| {
+                format!(
+                    "failed to create tags directory '{}'",
+                    output_folder.display()
+                )
+            })?;
+        }
+
+        for tag in tags {
+            let output_folder = output_folder.clone();
+            let state = self.tinylang_state.clone();
+            let template = template.clone();
+
+            self.eval_tasks
+                .as_mut()
+                .expect("eval_tasks initialized by process_folder")
+                .spawn(async move {
+                    let mut state = (*state).clone();
+                    state.insert("tag".into(), TinyLangType::Object(tag.as_tinylang_state()));
+                    let html = eval(&template.contents, state)
+                        .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                    let file_name = tag.output_name.clone();
+                    io::write_to_disk(output_folder, &file_name, html).await?;
+                    Ok(format!("tags/{file_name}"))
+                });
+        }
+        Ok(())
     }
 
     async fn mk_collection_dir(&mut self, collection: &MarkdownCollection) -> Result<PathBuf> {
@@ -258,6 +346,7 @@ impl Builder {
             let state = self.tinylang_state.clone();
 
             let template = template.clone();
+            let pretty = self.pretty_urls;
 
             self.eval_tasks
                 .as_mut()
@@ -269,7 +358,7 @@ impl Builder {
                         .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
 
                     // we need to save our file following the markdown file and not the template
-                    let file_name = swap_suffix(&item.name, ".md", ".html");
+                    let file_name = md_output_name(&item.name, pretty);
 
                     io::write_to_disk(output_folder, &file_name, html).await?;
                     Ok(file_name)
@@ -291,6 +380,7 @@ pub struct Website {
     template_folder: PathBuf,
     posts_folder: Option<PathBuf>,
     configuration: Option<Configuration>,
+    include_drafts: bool,
     cache: WebsiteCachedState,
 }
 
@@ -304,8 +394,16 @@ impl Website {
             template_folder,
             posts_folder,
             configuration,
+            include_drafts: false,
             cache: WebsiteCachedState::default(),
         }
+    }
+
+    /// Include documents marked `draft: true` or dated in the future,
+    /// e.g. when previewing the site locally.
+    pub(crate) fn with_drafts(mut self, include_drafts: bool) -> Self {
+        self.include_drafts = include_drafts;
+        self
     }
 
     pub async fn build_from_scratch(
@@ -329,11 +427,13 @@ impl Website {
         }
 
         let posts_per_page = self.configuration.as_ref().and_then(|c| c.posts_per_page);
+        let pretty_urls = self.pretty_urls();
         self.cache.builder = Some(Builder::new(
             self.build_state(&collections),
             output.to_path_buf(),
             posts_per_page,
             Arc::new(collections.clone()),
+            pretty_urls,
         ));
 
         self.compile_templates().await
@@ -422,6 +522,20 @@ impl Website {
                 }
             }
 
+            // A new or removed tag means tag pages must be created or deleted,
+            // which only a full rebuild does. Without a _tag.template no tag
+            // pages exist, so the tag set doesn't matter.
+            if self.template_folder.join("_tag.template").exists() {
+                let fresh_tags: std::collections::HashSet<String> =
+                    crate::tags::collect_tags(&collections, self.pretty_urls())
+                        .into_iter()
+                        .map(|t| t.name)
+                        .collect();
+                if deps.known_tags() != fresh_tags {
+                    return Err(anyhow::anyhow!("tag set changed, full rebuild required"));
+                }
+            }
+
             let affected = deps.affected_outputs(change);
             let mut markdown_items = Vec::new();
             for out in &affected {
@@ -450,7 +564,14 @@ impl Website {
 
             let standalone_items: Vec<StandaloneRebuildItem> = deps
                 .standalones()
-                .map(|(t, o)| (t.clone(), o.clone(), deps.page_for_output(o)))
+                .map(|(t, o)| {
+                    (
+                        t.clone(),
+                        o.clone(),
+                        deps.page_for_output(o),
+                        deps.tag_for_output(o),
+                    )
+                })
                 .collect();
 
             (markdown_items, standalone_items)
@@ -482,8 +603,9 @@ impl Website {
         }
 
         let posts_per_page = self.configuration.as_ref().and_then(|c| c.posts_per_page);
+        let all_tags = crate::tags::collect_tags(&collections, self.pretty_urls());
 
-        for (template_path, output_path, page_opt) in standalone_items {
+        for (template_path, output_path, page_opt, tag_opt) in standalone_items {
             let template = TemplateFile::new(&template_path)?;
             let output_dir = output_path
                 .parent()
@@ -496,6 +618,21 @@ impl Website {
                 })?
                 .to_string_lossy()
                 .to_string();
+            if let Some(tag_name) = tag_opt {
+                // the tag-set check above guarantees the tag still exists
+                let Some(tag) = all_tags.iter().find(|t| t.name == tag_name) else {
+                    continue;
+                };
+                let mut tag_state = state.clone();
+                tag_state.insert("tag".into(), TinyLangType::Object(tag.as_tinylang_state()));
+                eval_tasks.spawn(async move {
+                    let html = eval(&template.contents, tag_state)
+                        .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                    io::write_to_disk(output_dir, &file_name, html).await?;
+                    Ok(file_name)
+                });
+                continue;
+            }
             let s = match (posts_per_page.filter(|&p| p > 0), page_opt) {
                 (Some(per_page), Some(page)) => {
                     let total = total_pages_for(&collections, per_page);
@@ -507,7 +644,15 @@ impl Website {
                         ".template",
                         "",
                     );
-                    paginated_state(&state, &collections, &base_name, page, total, per_page)
+                    paginated_state(
+                        &state,
+                        &collections,
+                        &base_name,
+                        page,
+                        total,
+                        per_page,
+                        self.pretty_urls(),
+                    )
                 }
                 _ => state.clone(),
             };
@@ -556,7 +701,39 @@ impl Website {
             .take()
             .context("eval_tasks not initialized in builder")?;
         self.build_dependency_graph(&output_folder).await?;
+        self.generate_sitemap(&output_folder)?;
         Ok(eval_tasks)
+    }
+
+    /// Write sitemap.xml from the dependency graph's set of outputs. Skipped
+    /// when there is no configuration, since the site uri is needed to build
+    /// absolute urls.
+    fn generate_sitemap(&self, output: &Path) -> Result<()> {
+        let (Some(config), Some(deps)) = (self.configuration.as_ref(), self.cache.deps.as_ref())
+        else {
+            return Ok(());
+        };
+
+        let pretty = self.pretty_urls();
+        let pages: Vec<String> = deps
+            .all_outputs()
+            .filter_map(|p| p.strip_prefix(output).ok())
+            .map(|p| {
+                let page = p.to_string_lossy().replace('\\', "/");
+                if pretty {
+                    // list the canonical directory url, not the index.html file
+                    match page.strip_suffix("index.html") {
+                        Some(dir) => dir.to_string(),
+                        None => page,
+                    }
+                } else {
+                    page
+                }
+            })
+            .collect();
+
+        crate::sitemap::generate_sitemap(&config.uri, pages, output)
+            .context("failed to generate sitemap.xml")
     }
 
     /// Build the dependency graph for incremental builds. Must be called after
@@ -581,7 +758,14 @@ impl Website {
             let file = file?;
             deps.register_template(file.path.clone(), &file.contents, &base_dir);
 
-            if file.name.starts_with('_') {
+            if file.name == "_tag.template" {
+                for tag in crate::tags::collect_tags(collections, self.pretty_urls()) {
+                    let output_name = format!("tags/{}", tag.output_name);
+                    let output_path = output_folder.join(&output_name);
+                    deps.register_standalone(file.path.clone(), &output_name);
+                    deps.register_tag_output(output_path, &tag.name);
+                }
+            } else if file.name.starts_with('_') {
                 let collection_name = &file.name[1..file.name.len() - 9];
                 if collections.contains_key(collection_name) {
                     deps.register_collection_partial(collection_name, file.path.clone());
@@ -590,13 +774,14 @@ impl Website {
                 let base_name = swap_suffix(&file.name, ".template", "");
                 let total = total_pages_for(collections, per_page);
                 for page in 1..=total {
-                    let output_name = page_file_name(&base_name, page);
+                    let output_name = page_file_name(&base_name, page, self.pretty_urls());
                     let output_path = output_folder.join(&output_name);
                     deps.register_standalone(file.path.clone(), &output_name);
                     deps.register_page_number(output_path, page);
                 }
             } else {
-                let output_name = swap_suffix(&file.name, ".template", ".html");
+                let base_name = swap_suffix(&file.name, ".template", "");
+                let output_name = output_file_name(&base_name, self.pretty_urls());
                 deps.register_standalone(file.path.clone(), &output_name);
             }
         }
@@ -612,7 +797,7 @@ impl Website {
             );
             for item in &collection.collection {
                 let md_path = collection.relative_path.join(&item.name);
-                let output_name = swap_suffix(&item.name, ".md", ".html");
+                let output_name = md_output_name(&item.name, self.pretty_urls());
                 let output_path = output_dir.join(&output_name);
                 deps.register_markdown_output(md_path, collection_name, output_path);
             }
@@ -655,6 +840,7 @@ impl Website {
             .posts_per_page;
 
         let mut eval_tasks = JoinSet::new();
+        let all_tags = crate::tags::collect_tags(collections, self.pretty_urls());
 
         for output_path in affected {
             if let Some(template_path) = deps.template_for_output(&output_path) {
@@ -672,6 +858,21 @@ impl Website {
                     })?
                     .to_string_lossy()
                     .to_string();
+                if let Some(tag_name) = deps.tag_for_output(&output_path) {
+                    let Some(tag) = all_tags.iter().find(|t| t.name == tag_name) else {
+                        // tag disappeared; the markdown path triggers the full rebuild
+                        continue;
+                    };
+                    let mut tag_state = state.clone();
+                    tag_state.insert("tag".into(), TinyLangType::Object(tag.as_tinylang_state()));
+                    eval_tasks.spawn(async move {
+                        let html = eval(&template.contents, tag_state)
+                            .map_err(|e| anyhow::anyhow!("template evaluation failed: {e}"))?;
+                        io::write_to_disk(output_folder, &file_name, html).await?;
+                        Ok(file_name)
+                    });
+                    continue;
+                }
                 let eval_state = match (
                     posts_per_page.filter(|&p| p > 0),
                     deps.page_for_output(&output_path),
@@ -686,7 +887,15 @@ impl Website {
                             ".template",
                             "",
                         );
-                        paginated_state(state, collections, &base_name, page, total, per_page)
+                        paginated_state(
+                            state,
+                            collections,
+                            &base_name,
+                            page,
+                            total,
+                            per_page,
+                            self.pretty_urls(),
+                        )
                     }
                     _ => state.clone(),
                 };
@@ -746,6 +955,22 @@ impl Website {
             None => return Ok(collections),
         };
 
+        // pre-register a collection for every sub-folder so templates can
+        // rely on it existing even when the folder is empty or every document
+        // in it is a draft
+        if let Ok(entries) = std::fs::read_dir(posts_folder) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name() {
+                        collections
+                            .entry(name.to_string_lossy().to_string())
+                            .or_insert_with(|| MarkdownCollection::new(path.clone()));
+                    }
+                }
+            }
+        }
+
         let mut markdown_folder_reader = io::LazyFolderReader::new(posts_folder, "md")
             .context("could not create lazy folder reader for markdown folder")?;
 
@@ -759,7 +984,7 @@ impl Website {
                 }
             };
 
-            let markdown_content = match MarkdownDocument::new(
+            let mut markdown_content = match MarkdownDocument::new(
                 &file.contents,
                 file.name,
                 self.partial_uri(&file.path),
@@ -770,6 +995,12 @@ impl Website {
                     continue;
                 }
             };
+            markdown_content.highlight_code(self.code_theme());
+
+            if !self.include_drafts && markdown_content.is_draft() {
+                println!("skipping draft {}", markdown_content.name);
+                continue;
+            }
             let mut path = file.path;
             // remove the filename
             path.pop();
@@ -792,8 +1023,27 @@ impl Website {
             collection.collection.push(markdown_content);
         }
 
+        // newest-first default ordering plus next/previous navigation links
+        for collection in collections.values_mut() {
+            collection.sort_and_link();
+        }
+
         self.cache.collections = Some(collections.clone());
         Ok(collections)
+    }
+
+    fn pretty_urls(&self) -> bool {
+        self.configuration
+            .as_ref()
+            .map(|c| c.pretty_urls)
+            .unwrap_or(false)
+    }
+
+    fn code_theme(&self) -> &str {
+        self.configuration
+            .as_ref()
+            .and_then(|c| c.code_theme.as_deref())
+            .unwrap_or(crate::highlight::DEFAULT_THEME)
     }
 
     fn partial_uri(&self, path: &Path) -> String {
@@ -804,7 +1054,12 @@ impl Website {
             .as_ref()
             .and_then(|folder| path.strip_prefix(folder).ok())
             .unwrap_or(path);
-        let uri = swap_suffix(&relative.to_string_lossy(), ".md", ".html");
+        let relative = relative.to_string_lossy();
+        let uri = if self.pretty_urls() {
+            format!("{}/", relative.strip_suffix(".md").unwrap_or(&relative))
+        } else {
+            swap_suffix(&relative, ".md", ".html")
+        };
         format!("/{}", uri.trim_start_matches('/'))
     }
 
@@ -841,6 +1096,12 @@ impl Website {
         state.insert("sort_by_key".into(), TinyLangType::Function(sort_by_key));
         state.insert("reverse".into(), TinyLangType::Function(reverse));
         state.insert("paginate".into(), TinyLangType::Function(paginate));
+        state.insert("date_format".into(), TinyLangType::Function(date_format));
+        state.insert("slugify".into(), TinyLangType::Function(slugify));
+        state.insert("where".into(), TinyLangType::Function(where_fn));
+        state.insert("limit".into(), TinyLangType::Function(limit));
+        state.insert("group_by".into(), TinyLangType::Function(group_by));
+        state.insert("truncate".into(), TinyLangType::Function(truncate));
         state
     }
 
@@ -849,6 +1110,9 @@ impl Website {
         // passes all the collections state as well so users can use it for
         // things like pagination
         state.extend(self.build_collection_state(collections));
+        // every template can list all tags, e.g. for a tag cloud
+        let tags = crate::tags::collect_tags(collections, self.pretty_urls());
+        state.insert("tags".into(), crate::tags::tags_state(&tags));
         self.cache.state = Some(state.clone());
         state
     }
@@ -860,13 +1124,37 @@ mod tests {
 
     #[test]
     fn test_page_file_name_page_one() {
-        assert_eq!(page_file_name("index", 1), "index.html");
+        assert_eq!(page_file_name("index", 1, false), "index.html");
     }
 
     #[test]
     fn test_page_file_name_subsequent_pages() {
-        assert_eq!(page_file_name("index", 2), "index-page-2.html");
-        assert_eq!(page_file_name("index", 10), "index-page-10.html");
+        assert_eq!(page_file_name("index", 2, false), "index-page-2.html");
+        assert_eq!(page_file_name("index", 10, false), "index-page-10.html");
+    }
+
+    #[test]
+    fn test_page_file_name_pretty() {
+        assert_eq!(page_file_name("index", 1, true), "index.html");
+        assert_eq!(page_file_name("index", 2, true), "index-page-2/index.html");
+        assert_eq!(page_file_name("blog", 1, true), "blog/index.html");
+    }
+
+    #[test]
+    fn test_page_uri() {
+        assert_eq!(page_uri("index", 2, false), "index-page-2.html");
+        assert_eq!(page_uri("index", 1, true), "/");
+        assert_eq!(page_uri("index", 2, true), "/index-page-2/");
+        assert_eq!(page_uri("blog", 1, true), "/blog/");
+    }
+
+    #[test]
+    fn test_output_file_name() {
+        assert_eq!(output_file_name("about", false), "about.html");
+        assert_eq!(output_file_name("about", true), "about/index.html");
+        assert_eq!(output_file_name("index", true), "index.html");
+        assert_eq!(md_output_name("hello.md", true), "hello/index.html");
+        assert_eq!(md_output_name("hello.md", false), "hello.html");
     }
 
     #[test]
@@ -920,6 +1208,41 @@ mod tests {
         );
         assert_eq!("index", swap_suffix("index.template", ".template", ""));
         assert_eq!("no-extension", swap_suffix("no-extension", ".md", ".html"));
+    }
+
+    #[tokio::test]
+    async fn test_empty_collection_folder_still_registered() {
+        let tmp = tempdir::TempDir::new("md").unwrap();
+        std::fs::create_dir(tmp.path().join("posts")).unwrap();
+        let mut website = Website::new(
+            None,
+            PathBuf::from("templates"),
+            Some(tmp.path().to_path_buf()),
+        );
+        let collections = website.build_markdown_collections().await.unwrap();
+        assert!(collections.contains_key("posts"));
+        assert!(collections.get("posts").unwrap().collection.is_empty());
+    }
+
+    #[test]
+    fn test_partial_uri_pretty() {
+        let config = Configuration {
+            website_name: "site".into(),
+            uri: "https://example.com".into(),
+            custom_keys: HashMap::new(),
+            posts_per_page: None,
+            code_theme: None,
+            pretty_urls: true,
+        };
+        let website = Website::new(
+            Some(config),
+            PathBuf::from("templates"),
+            Some(PathBuf::from("markdown")),
+        );
+        assert_eq!(
+            "/posts/hello/",
+            website.partial_uri(Path::new("markdown/posts/hello.md"))
+        );
     }
 
     #[test]
