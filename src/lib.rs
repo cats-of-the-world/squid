@@ -1,10 +1,13 @@
 mod app;
 mod config;
 mod deps;
+mod highlight;
 mod http;
 mod io;
 mod md;
 mod rss;
+mod sitemap;
+mod tags;
 mod template;
 mod tinylang;
 mod watch;

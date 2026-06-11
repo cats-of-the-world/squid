@@ -1,0 +1,10 @@
+<html>
+    <body>
+        <h1>{{ tag.name }}</h1>
+        <ul>
+        {% for item in tag.items %}
+            <li><a href="{{ item.partial_uri }}">{{ item.title }}</a></li>
+        {% end %}
+        </ul>
+    </body>
+</html>

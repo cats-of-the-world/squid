@@ -65,6 +65,10 @@ fn test_creates_basic_output() {
         );
     }
     for (key, value) in created {
+        // sitemap.xml is validated separately below since it lists generated pages
+        if key == "sitemap.xml" {
+            continue;
+        }
         let expected_content = match expected.get(&key) {
             Some(t) => t,
             None => {
@@ -79,6 +83,9 @@ fn test_creates_basic_output() {
         }
         assert_eq!(expected_content, &value);
     }
+
+    let sitemap = fs::read_to_string(tempdir.path().join("sitemap.xml")).unwrap();
+    assert!(sitemap.contains("<loc>"), "sitemap should list pages");
 }
 
 #[tokio::test]
@@ -164,6 +171,13 @@ async fn test_webserver() {
     .unwrap();
 
     assert_eq!(200, resp.status());
+
+    let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("__squid/livereload"),
+        "served html should contain the live-reload script"
+    );
 
     kill_child(&cargo_bin.id().to_string())
 }

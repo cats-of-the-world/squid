@@ -87,6 +87,125 @@ pub fn paginate(arguments: FuncArguments, _state: &State) -> TinyLangType {
     TinyLangType::Vec(items[start..end].to_vec())
 }
 
+/// format a frontmatter date with a chrono strftime string:
+/// date_format(post.date, '%B %d, %Y') -> "January 10, 2024"
+pub fn date_format(arguments: FuncArguments, _state: &State) -> TinyLangType {
+    let (Some(TinyLangType::String(date)), Some(TinyLangType::String(fmt))) =
+        (arguments.first(), arguments.get(1))
+    else {
+        return TinyLangType::Nil;
+    };
+
+    let Some(parsed) = crate::md::parse_date(date) else {
+        return TinyLangType::Nil;
+    };
+
+    // validate the format string first: chrono panics when displaying a
+    // DelayedFormat built from an invalid specifier
+    let items: Vec<chrono::format::Item> = chrono::format::StrftimeItems::new(fmt).collect();
+    if items
+        .iter()
+        .any(|i| matches!(i, chrono::format::Item::Error))
+    {
+        return TinyLangType::Nil;
+    }
+
+    TinyLangType::String(parsed.format_with_items(items.into_iter()).to_string())
+}
+
+/// turn any string into a url-friendly slug: slugify('Rust & Web') -> "rust-web"
+pub fn slugify(arguments: FuncArguments, _state: &State) -> TinyLangType {
+    match arguments.first() {
+        Some(TinyLangType::String(s)) => TinyLangType::String(crate::tags::slugify(s)),
+        _ => TinyLangType::Nil,
+    }
+}
+
+/// filter objects by a key's value: where(posts.items, 'author', 'era')
+pub fn where_fn(arguments: FuncArguments, _state: &State) -> TinyLangType {
+    let (Some(TinyLangType::Vec(items)), Some(TinyLangType::String(key)), Some(value)) =
+        (arguments.first(), arguments.get(1), arguments.get(2))
+    else {
+        return TinyLangType::Nil;
+    };
+
+    let expected = value.to_string();
+    TinyLangType::Vec(
+        items
+            .iter()
+            .filter(|item| match item {
+                TinyLangType::Object(o) => o
+                    .get(key)
+                    .map(|v| v.to_string() == expected)
+                    .unwrap_or(false),
+                _ => false,
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// take the first n items of an array: limit(posts.items, 5)
+pub fn limit(arguments: FuncArguments, _state: &State) -> TinyLangType {
+    let (Some(TinyLangType::Vec(items)), Some(TinyLangType::Numeric(n))) =
+        (arguments.first(), arguments.get(1))
+    else {
+        return TinyLangType::Nil;
+    };
+
+    let n = (*n).max(0.0) as usize;
+    TinyLangType::Vec(items.iter().take(n).cloned().collect())
+}
+
+/// group objects by a key's value: group_by(posts.items, 'author') returns
+/// [{key: 'era', items: [...]}, ...] sorted by key
+pub fn group_by(arguments: FuncArguments, _state: &State) -> TinyLangType {
+    let (Some(TinyLangType::Vec(items)), Some(TinyLangType::String(key))) =
+        (arguments.first(), arguments.get(1))
+    else {
+        return TinyLangType::Nil;
+    };
+
+    let mut groups: std::collections::BTreeMap<String, Vec<TinyLangType>> =
+        std::collections::BTreeMap::new();
+    for item in items {
+        let group_key = match item {
+            TinyLangType::Object(o) => o.get(key).map(|v| v.to_string()).unwrap_or_default(),
+            _ => String::new(),
+        };
+        groups.entry(group_key).or_default().push(item.clone());
+    }
+
+    TinyLangType::Vec(
+        groups
+            .into_iter()
+            .map(|(group_key, group_items)| {
+                let mut group = State::new();
+                group.insert("key".into(), group_key.into());
+                group.insert("items".into(), TinyLangType::Vec(group_items));
+                TinyLangType::Object(group)
+            })
+            .collect(),
+    )
+}
+
+/// shorten a string to at most n characters, appending an ellipsis when cut:
+/// truncate(post.title, 50)
+pub fn truncate(arguments: FuncArguments, _state: &State) -> TinyLangType {
+    let (Some(TinyLangType::String(s)), Some(TinyLangType::Numeric(n))) =
+        (arguments.first(), arguments.get(1))
+    else {
+        return TinyLangType::Nil;
+    };
+
+    let n = (*n).max(0.0) as usize;
+    if s.chars().count() <= n {
+        return TinyLangType::String(s.clone());
+    }
+    let cut: String = s.chars().take(n).collect();
+    TinyLangType::String(format!("{}…", cut.trim_end()))
+}
+
 /// reverse an array
 pub fn reverse(arguments: FuncArguments, _state: &State) -> TinyLangType {
     let mut collection = match arguments.first() {
@@ -244,6 +363,162 @@ mod tests {
     fn test_paginate_insufficient_args() {
         let result = paginate(vec![TinyLangType::Numeric(1.0)], &State::new());
         assert!(result == TinyLangType::Nil);
+    }
+
+    #[test]
+    fn test_date_format_basic() {
+        let result = date_format(
+            vec![
+                TinyLangType::String("2024-01-10".into()),
+                TinyLangType::String("%B %d, %Y".into()),
+            ],
+            &State::new(),
+        );
+        assert!(result == TinyLangType::String("January 10, 2024".into()));
+    }
+
+    #[test]
+    fn test_date_format_invalid_date_returns_nil() {
+        let result = date_format(
+            vec![
+                TinyLangType::String("not a date".into()),
+                TinyLangType::String("%Y".into()),
+            ],
+            &State::new(),
+        );
+        assert!(result == TinyLangType::Nil);
+    }
+
+    #[test]
+    fn test_date_format_invalid_format_returns_nil() {
+        let result = date_format(
+            vec![
+                TinyLangType::String("2024-01-10".into()),
+                TinyLangType::String("%QQQ".into()),
+            ],
+            &State::new(),
+        );
+        assert!(result == TinyLangType::Nil);
+    }
+
+    #[test]
+    fn test_slugify_function() {
+        let result = slugify(
+            vec![TinyLangType::String("Hello, World!".into())],
+            &State::new(),
+        );
+        assert!(result == TinyLangType::String("hello-world".into()));
+    }
+
+    #[test]
+    fn test_where_filters_by_value() {
+        let items = TinyLangType::Vec(vec![
+            make_obj("author", "era"),
+            make_obj("author", "other"),
+            make_obj("author", "era"),
+        ]);
+        let result = where_fn(
+            vec![
+                items,
+                TinyLangType::String("author".into()),
+                TinyLangType::String("era".into()),
+            ],
+            &State::new(),
+        );
+        let TinyLangType::Vec(filtered) = result else {
+            panic!("expected vec");
+        };
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_where_missing_key_excluded() {
+        let items = TinyLangType::Vec(vec![make_obj("author", "era"), make_obj("title", "x")]);
+        let result = where_fn(
+            vec![
+                items,
+                TinyLangType::String("author".into()),
+                TinyLangType::String("era".into()),
+            ],
+            &State::new(),
+        );
+        let TinyLangType::Vec(filtered) = result else {
+            panic!("expected vec");
+        };
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn test_limit_takes_first_n() {
+        let items = TinyLangType::Vec((1..=5).map(|i| TinyLangType::Numeric(i as f64)).collect());
+        let result = limit(vec![items, TinyLangType::Numeric(2.0)], &State::new());
+        let TinyLangType::Vec(limited) = result else {
+            panic!("expected vec");
+        };
+        assert_eq!(limited.len(), 2);
+        assert!(limited[0] == TinyLangType::Numeric(1.0));
+    }
+
+    #[test]
+    fn test_limit_larger_than_len() {
+        let items = TinyLangType::Vec(vec![TinyLangType::Numeric(1.0)]);
+        let result = limit(vec![items, TinyLangType::Numeric(10.0)], &State::new());
+        let TinyLangType::Vec(limited) = result else {
+            panic!("expected vec");
+        };
+        assert_eq!(limited.len(), 1);
+    }
+
+    #[test]
+    fn test_group_by_groups_and_sorts() {
+        let items = TinyLangType::Vec(vec![
+            make_obj("author", "zoe"),
+            make_obj("author", "anna"),
+            make_obj("author", "zoe"),
+        ]);
+        let result = group_by(
+            vec![items, TinyLangType::String("author".into())],
+            &State::new(),
+        );
+        let TinyLangType::Vec(groups) = result else {
+            panic!("expected vec");
+        };
+        assert_eq!(groups.len(), 2);
+        let TinyLangType::Object(first) = &groups[0] else {
+            panic!("expected object");
+        };
+        assert!(first.get("key").unwrap() == &TinyLangType::String("anna".into()));
+        let TinyLangType::Object(second) = &groups[1] else {
+            panic!("expected object");
+        };
+        let Some(TinyLangType::Vec(zoe_items)) = second.get("items") else {
+            panic!("expected items vec");
+        };
+        assert_eq!(zoe_items.len(), 2);
+    }
+
+    #[test]
+    fn test_truncate_shortens_with_ellipsis() {
+        let result = truncate(
+            vec![
+                TinyLangType::String("hello world".into()),
+                TinyLangType::Numeric(5.0),
+            ],
+            &State::new(),
+        );
+        assert!(result == TinyLangType::String("hello…".into()));
+    }
+
+    #[test]
+    fn test_truncate_short_string_unchanged() {
+        let result = truncate(
+            vec![
+                TinyLangType::String("hi".into()),
+                TinyLangType::Numeric(5.0),
+            ],
+            &State::new(),
+        );
+        assert!(result == TinyLangType::String("hi".into()));
     }
 
     #[test]

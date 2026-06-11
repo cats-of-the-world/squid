@@ -2,7 +2,19 @@
 
 Squid is a static website generator written in Rust that uses the template language "TinyLang".
 
-The project is still under development.
+## Features
+
+- **GitHub Flavored Markdown** — tables, strikethrough, footnotes, task lists, and raw HTML pass-through
+- **Syntax highlighting** for fenced code blocks (configurable theme, no extra CSS needed)
+- **Collections** — every folder of markdown files becomes a collection rendered by its `_<name>.template`
+- **Tags** — declare `tags: rust, web` in frontmatter; a `_tag.template` generates `/tags/<slug>.html` pages, and every template can read the global `tags` list
+- **Pagination** — set `posts_per_page` and use the `pagination` object in templates
+- **Drafts & scheduled posts** — `draft: true` or a future `date` keeps a post out of the build (preview them with `--drafts`)
+- **Date-sorted collections** with `next`/`previous` post navigation
+- **RSS feed and sitemap.xml** generated automatically
+- **Pretty URLs** — opt into `/posts/my-post/` style urls with `pretty_urls = true`
+- **Dev server with live reload** — `--serve 8080` rebuilds on change and refreshes the browser
+- **Incremental rebuilds** — a dependency graph rebuilds only the affected pages while watching
 
 ## TinyLang
 
@@ -10,6 +22,30 @@ TinyLang is a lightweight template language that is easy to learn and use. It wa
  but it can also be used independently in other projects. TinyLang has a simple syntax that is similar to other popular template languages like Handlebars and Mustache.
 
 If you're interested in learning more about TinyLang, you can check out the [GitHub repository](https://github.com/era/tinylang) for the project.
+
+### Built-in template functions
+
+| Function | Example | Description |
+| -------- | ------- | ----------- |
+| `render` | `{{ render('templates/_header.template') }}` | include another template |
+| `sort_by_key` | `{{ sort_by_key(posts.items, 'title') }}` | sort objects by a key (add `'reversed'` to invert) |
+| `reverse` | `{{ reverse(posts.items) }}` | reverse an array |
+| `paginate` | `{{ paginate(posts.items, 2, 10) }}` | slice a page out of an array |
+| `where` | `{{ where(posts.items, 'author', 'era') }}` | filter objects by a key's value |
+| `limit` | `{{ limit(posts.items, 5) }}` | first n items |
+| `group_by` | `{{ group_by(posts.items, 'author') }}` | group objects: `[{key, items}, ...]` |
+| `date_format` | `{{ date_format(content.date, '%B %d, %Y') }}` | format a frontmatter date |
+| `slugify` | `{{ slugify(content.title) }}` | url-friendly slug |
+| `truncate` | `{{ truncate(content.title, 50) }}` | shorten a string with an ellipsis |
+
+### Template state
+
+Every template sees the config values (`website_name`, `uri`, everything in `[custom_keys]`),
+one object per collection (e.g. `posts.items`, `posts.size`), and the global `tags` list.
+Collection partials (`_posts.template`) additionally get `content` (the current document:
+frontmatter keys, `content`, `partial_uri`, `next`, `previous`). The reserved `_tag.template`
+gets `tag` (`name`, `slug`, `uri`, `size`, `items`). Paginated templates get `pagination`
+(`current_page`, `total_pages`, `has_next`, `has_prev`, `next_file`, `prev_file`).
 
 ## Getting Started
 
@@ -48,6 +84,44 @@ squid new posts my-post-title
 ```
 
 This creates `my-post-title.md` inside the `posts` subfolder of your markdown directory.
+
+To preview your site locally with live reload (drafts included):
+
+```sh
+squid --template-folder templates --markdown-folder markdown --static-resources static \
+      --output-folder output --template-variables config.toml --watch --serve 8080 --drafts
+```
+
+## Configuration
+
+```toml
+website_name = "My Website"
+uri = "https://example.com"
+
+# optional
+pretty_urls = true            # /posts/my-post/ instead of /posts/my-post.html
+posts_per_page = 10           # paginate listings
+code_theme = "InspiredGitHub" # syntax highlighting theme, "none" disables
+
+[custom_keys]                 # exposed to every template
+description = "A website built with Squid"
+language = "en-us"
+```
+
+Available `code_theme` values: `InspiredGitHub`, `Solarized (dark)`, `Solarized (light)`,
+`base16-eighties.dark`, `base16-mocha.dark`, `base16-ocean.dark`, `base16-ocean.light`, `none`.
+
+## Frontmatter
+
+```markdown
+---
+title: My Post
+date: 2024-01-10            # also accepts RFC 3339 / RFC 2822
+tags: rust, web             # or a YAML list
+draft: true                 # excluded from builds unless --drafts
+excerpt: Short description  # used in the RSS feed
+---
+```
 
 ## Contributing
 

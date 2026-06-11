@@ -11,6 +11,14 @@ pub struct Configuration {
     pub custom_keys: HashMap<String, String>,
     #[serde(default)]
     pub posts_per_page: Option<usize>,
+    /// syntect theme used to highlight fenced code blocks;
+    /// "none" disables highlighting
+    #[serde(default)]
+    pub code_theme: Option<String>,
+    /// output directory-style urls (/posts/my-post/ backed by
+    /// posts/my-post/index.html) instead of /posts/my-post.html
+    #[serde(default)]
+    pub pretty_urls: bool,
 }
 
 impl Configuration {
