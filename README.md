@@ -4,18 +4,18 @@ Squid is a static website generator written in Rust that uses the template langu
 
 ## Features
 
-- **GitHub Flavored Markdown** — tables, strikethrough, footnotes, task lists, and raw HTML pass-through
-- **Typst** — `.typ` files are compiled to HTML alongside markdown, same YAML frontmatter
+- **GitHub Flavored Markdown** - tables, strikethrough, footnotes, task lists, and raw HTML pass-through
+- **Typst** - `.typ` files are compiled to HTML alongside markdown, same YAML frontmatter
 - **Syntax highlighting** for fenced code blocks (configurable theme, no extra CSS needed)
-- **Collections** — every folder of markdown files becomes a collection rendered by its `_<name>.template`
-- **Tags** — declare `tags: rust, web` in frontmatter; a `_tag.template` generates `/tags/<slug>.html` pages, and every template can read the global `tags` list
-- **Pagination** — set `posts_per_page` and use the `pagination` object in templates
-- **Drafts & scheduled posts** — `draft: true` or a future `date` keeps a post out of the build (preview them with `--drafts`)
+- **Collections** - every folder of markdown files becomes a collection rendered by its `_<name>.template`
+- **Tags** - declare `tags: rust, web` in frontmatter; a `_tag.template` generates `/tags/<slug>.html` pages, and every template can read the global `tags` list
+- **Pagination** - set `posts_per_page` and use the `pagination` object in templates
+- **Drafts & scheduled posts** - `draft: true` or a future `date` keeps a post out of the build (preview them with `--drafts`)
 - **Date-sorted collections** with `next`/`previous` post navigation
 - **RSS feed and sitemap.xml** generated automatically
-- **Pretty URLs** — opt into `/posts/my-post/` style urls with `pretty_urls = true`
-- **Dev server with live reload** — `--serve 8080` rebuilds on change and refreshes the browser
-- **Incremental rebuilds** — a dependency graph rebuilds only the affected pages while watching
+- **Pretty URLs** - opt into `/posts/my-post/` style urls with `pretty_urls = true`
+- **Dev server with live reload** - `--serve 8080` rebuilds on change and refreshes the browser
+- **Incremental rebuilds** - a dependency graph rebuilds only the affected pages while watching
 
 ## TinyLang
 
@@ -53,7 +53,7 @@ gets `tag` (`name`, `slug`, `uri`, `size`, `items`). Paginated templates get `pa
 To get started with Squid, you'll need to have Rust installed on your computer. Once you have Rust installed, you can clone the Squid repository and build the project using Cargo:
 
 ```sh
-git clone https://github.com/example/squid.git
+git clone https://github.com/cats-of-the-world/squid.git
 cd squid
 cargo build --release
 ```
@@ -150,7 +150,7 @@ Body text, $ E = m c^2 $ math, and everything else Typst supports.
 
 `.typ` and `.md` files can be mixed freely within the same collection.
 Compilation runs in-process (no external `typst` binary required) and only
-supports a single self-contained file — `#include` and image files are not
+supports a single self-contained file - `#include` and image files are not
 resolved.
 
 ## Contributing
