@@ -3184,9 +3184,9 @@ dependencies = [
 
 [[package]]
 name = "tinylang"
-version = "0.5.4"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "951f4a3b7a4df55644892a38f266ea402de237a8bbb2a95ff63e1c359a0e28ab"
+checksum = "dc17855037304af502231524bb3e38675a9f8a5d07635eff140b667eecd45fe2"
 dependencies = [
  "pest",
  "pest_derive",
