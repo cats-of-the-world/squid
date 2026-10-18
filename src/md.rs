@@ -6,7 +6,47 @@ use gray_matter::Matter;
 use gray_matter::Pod;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use tinylang::types::{State, TinyLangType};
+
+/// First `src` of an `<img>` in rendered HTML. Markdown images and raw
+/// `<img>` tags both end up here, while images inside code blocks are
+/// escaped and therefore ignored.
+static IMG_SRC_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"(?is)<img\b[^>]*?\s+src\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#)
+        .unwrap()
+});
+
+fn first_image_url(html: &str) -> Option<String> {
+    IMG_SRC_RE
+        .captures(html)
+        .and_then(|caps| caps.iter().skip(1).flatten().next())
+        .map(|m| m.as_str().trim().to_string())
+        .filter(|src| !src.is_empty())
+}
+
+/// Make a site-relative url absolute so it is usable in feeds and Open Graph
+/// metadata. Absolute and protocol-relative urls are returned untouched.
+fn absolute_url(url: &str, base: &str) -> String {
+    if url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("//")
+        || url.starts_with("data:")
+    {
+        return url.to_string();
+    }
+
+    let base = base.trim_end_matches('/');
+    if base.is_empty() {
+        return url.to_string();
+    }
+
+    if let Some(path) = url.strip_prefix('/') {
+        format!("{base}/{path}")
+    } else {
+        format!("{base}/{url}")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MarkdownCollection {
@@ -104,6 +144,10 @@ pub struct MarkdownDocument {
     pub html_content: String,
     pub name: String,
     pub partial_uri: String,
+    /// site origin, used to turn relative image/url values into absolute ones
+    pub base_url: String,
+    /// first image in the rendered content, before absolutization
+    pub image: Option<String>,
     /// the newer adjacent document, set by MarkdownCollection::sort_and_link
     pub next: Option<Neighbor>,
     /// the older adjacent document, set by MarkdownCollection::sort_and_link
@@ -189,11 +233,15 @@ impl MarkdownDocument {
             None => HashMap::new(),
         };
 
+        let image = first_image_url(&html_content);
+
         Ok(Self {
             header,
             html_content,
             name,
             partial_uri,
+            base_url: String::new(),
+            image,
             next: None,
             previous: None,
         })
@@ -262,17 +310,14 @@ impl MarkdownDocument {
             .collect()
     }
 
-    pub fn to_post_metadata(&self) -> Result<crate::rss::PostMetadata> {
-        let date = self.date().unwrap_or_else(Utc::now);
-
-        // Get excerpt from header or generate from content
-        let excerpt = self
-            .header
+    /// Post description from frontmatter, falling back to the first
+    /// paragraph of the rendered content (truncated to 150 characters).
+    pub fn description(&self) -> String {
+        self.header
             .get("excerpt")
+            .or_else(|| self.header.get("description"))
             .cloned()
-            .or_else(|| self.header.get("description").cloned())
             .unwrap_or_else(|| {
-                // Extract first paragraph from HTML content
                 let plain_text =
                     html2text::from_read(self.html_content.as_bytes(), 80).unwrap_or_default();
                 plain_text
@@ -282,7 +327,12 @@ impl MarkdownDocument {
                     .chars()
                     .take(150)
                     .collect()
-            });
+            })
+    }
+
+    pub fn to_post_metadata(&self) -> Result<crate::rss::PostMetadata> {
+        let date = self.date().unwrap_or_else(Utc::now);
+        let excerpt = self.description();
 
         let tags = self.tags();
 
@@ -308,6 +358,23 @@ impl MarkdownDocument {
         item_state.insert("content".into(), self.html_content.clone().into());
 
         item_state.insert("partial_uri".to_string(), self.partial_uri.clone().into());
+        item_state.insert("description".into(), self.description().into());
+
+        // absolute canonical url and Open Graph image; the frontmatter `image`
+        // key wins over the first image found in the content
+        item_state.insert(
+            "url".into(),
+            absolute_url(&self.partial_uri, &self.base_url).into(),
+        );
+        let image = self
+            .header
+            .get("image")
+            .filter(|image| !image.trim().is_empty())
+            .cloned()
+            .or_else(|| self.image.clone())
+            .map(|image| absolute_url(&image, &self.base_url))
+            .unwrap_or_default();
+        item_state.insert("image".into(), image.into());
 
         let neighbor_state = |n: &Option<Neighbor>| match n {
             Some(n) => TinyLangType::Object(n.as_tinylang_state()),
@@ -486,6 +553,65 @@ excerpt: Test excerpt
             doc.html_content.contains("<div class=\"custom\">"),
             "{}",
             doc.html_content
+        );
+    }
+
+    #[test]
+    fn test_first_image_from_markdown() {
+        let content = "intro\n\n![alt](/posts/diagram.png)\n\n![second](/posts/other.png)";
+        let doc = MarkdownDocument::new(content, "i.md".into(), "/i".into()).unwrap();
+        assert_eq!(doc.image.as_deref(), Some("/posts/diagram.png"));
+    }
+
+    #[test]
+    fn test_first_image_from_raw_html() {
+        let content = "before\n\n<img alt=\"x\" src=\"https://example.com/a.jpg\" />";
+        let doc = MarkdownDocument::new(content, "i.md".into(), "/i".into()).unwrap();
+        assert_eq!(doc.image.as_deref(), Some("https://example.com/a.jpg"));
+    }
+
+    #[test]
+    fn test_image_inside_code_block_is_ignored() {
+        let content = "```\n![alt](/ignored.png)\n```";
+        let doc = MarkdownDocument::new(content, "c.md".into(), "/c".into()).unwrap();
+        assert_eq!(doc.image, None);
+    }
+
+    #[test]
+    fn test_image_state_is_absolute() {
+        let content = "---\ntitle: Post\n---\n![alt](/posts/diagram.png)";
+        let mut doc = MarkdownDocument::new(content, "i.md".into(), "/i".into()).unwrap();
+        doc.base_url = "https://elias.sh".into();
+        let state = doc.as_tinylang_state();
+        assert!(matches!(
+            state.get("image"),
+            Some(TinyLangType::String(image)) if image == "https://elias.sh/posts/diagram.png"
+        ));
+        assert!(matches!(
+            state.get("url"),
+            Some(TinyLangType::String(url)) if url == "https://elias.sh/i"
+        ));
+    }
+
+    #[test]
+    fn test_frontmatter_image_wins() {
+        let content = "---\ntitle: Post\nimage: /cover.png\n---\n![alt](/content.png)";
+        let mut doc = MarkdownDocument::new(content, "i.md".into(), "/i".into()).unwrap();
+        doc.base_url = "https://elias.sh".into();
+        let state = doc.as_tinylang_state();
+        assert!(matches!(
+            state.get("image"),
+            Some(TinyLangType::String(image)) if image == "https://elias.sh/cover.png"
+        ));
+    }
+
+    #[test]
+    fn test_image_state_empty_without_images() {
+        let mut doc = MarkdownDocument::new("no images", "n.md".into(), "/n".into()).unwrap();
+        doc.base_url = "https://elias.sh".into();
+        let state = doc.as_tinylang_state();
+        assert!(
+            matches!(state.get("image"), Some(TinyLangType::String(image)) if image.is_empty())
         );
     }
 

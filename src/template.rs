@@ -1012,6 +1012,11 @@ impl Website {
                     }
                 }
             };
+            markdown_content.base_url = self
+                .configuration
+                .as_ref()
+                .map(|c| c.uri.clone())
+                .unwrap_or_default();
             markdown_content.highlight_code(self.code_theme());
 
             if !self.include_drafts && markdown_content.is_draft() {
